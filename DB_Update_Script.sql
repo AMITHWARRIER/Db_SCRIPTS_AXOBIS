@@ -1421,6 +1421,7 @@ BEGIN
       AND P.Deleted = 0 AND D.Deleted = 0
       AND (C.Deleted = 0 OR C.GuID IS NULL)
       AND P.IsActive = 1 AND D.IsActive = 1
+      AND ISNULL(P.MenuItem, 1) = 1
     ORDER BY P.Name;
 END
 GO
@@ -1447,6 +1448,7 @@ BEGIN
     WHERE P.CategoryID = @CategoryID
       AND ISNULL(P.IsActive, 0) = 1 AND ISNULL(D.IsActive, 0) = 1
       AND ISNULL(P.Deleted, 0) = 0 AND ISNULL(D.Deleted, 0) = 0
+      AND ISNULL(P.MenuItem, 1) = 1
     ORDER BY P.Name;
 END
 GO
@@ -9767,4 +9769,272 @@ WHERE Type = 'DC'
 GO
 
 PRINT 'Section W complete.';
+GO
+
+-- ============================================================
+-- Section X - Consumption Report stored procedures (2026-08-01)
+-- ============================================================
+-- New reports: "Item wise Consumption Report" and "Consumption Report based on
+-- Menu Items" (customer spec: Meat Point Grill - New Report.xlsx). Both turn POS
+-- sales quantities into raw-material consumption using the existing Product BOQ
+-- (recipe) data: restaurant.Inv_ProductBOQMaster/Detail.
+--
+-- Sales source mirrors restaurant.Report_ItemWiseSalesreportPaging exactly:
+-- R_SalesMaster/R_SalesDetail (settled bills) UNION ALL R_SalesTempMaster/
+-- R_SalesTempDetail (current bills synced live from the Windows POS app) --
+-- both must be included for accurate consumption figures. Joined to
+-- restaurant.Product + restaurant.ProductPriceDetail (per-branch Category/Group)
+-- the same way, NOT the legacy dbo.R_Product table used by
+-- Report_ItemWiseSalesReportSummary (that table is empty in this DB).
+--
+-- A product can have more than one non-deleted Inv_ProductBOQMaster row (recipe
+-- re-saved over time) -- only the most recently dated one per product is used,
+-- otherwise item/raw-material rows fan out into duplicates.
+--
+-- restaurant.Product.UnitID and restaurant.Inv_ProductBOQDetail.UnitId both
+-- resolve against dbo.R_Unit (NOT dbo.Unit -- verified empty overlap on this DB).
+--
+-- @BranchID is effectively required: restaurant.ProductPriceDetail is looked up
+-- per-branch (INNER JOIN ... AND PPD.BranchID = @BranchID), same requirement as
+-- the existing Report_ItemWiseSalesreportPaging proc.
+CREATE OR ALTER PROCEDURE [restaurant].[Report_ItemWiseConsumptionReport]
+(
+    @BranchID    VARCHAR(MAX) = NULL,
+    @SectionID   VARCHAR(MAX) = NULL,
+    @CounterID   VARCHAR(MAX) = NULL,
+    @ProductID   VARCHAR(MAX) = NULL,
+    @CategoryID  VARCHAR(MAX) = NULL,
+    @GroupID     VARCHAR(MAX) = NULL,
+    @UserID      VARCHAR(MAX) = NULL,
+    @FromDate    DATE = NULL,
+    @ToDate      DATE = NULL,
+    @IsDayClosed INT  = NULL
+)
+AS
+BEGIN
+    SET ARITHABORT ON
+    SET XACT_ABORT ON
+    SET NOCOUNT ON
+
+    DECLARE @R_ToDate DATE = DATEADD(DAY, 1, @ToDate)
+
+    IF OBJECT_ID('tempdb..#ICR_SoldItems') IS NOT NULL DROP TABLE #ICR_SoldItems
+    IF OBJECT_ID('tempdb..#ICR_LatestBOQ') IS NOT NULL DROP TABLE #ICR_LatestBOQ
+
+    SELECT ProductID, SUM(Quantity) AS Quantity, SUM(Total) AS Total
+    INTO #ICR_SoldItems
+    FROM
+    (
+        SELECT SD.ProductId AS ProductID, SD.Quantity,
+               ((SD.UnitRate * SD.Quantity) - SD.Discount) + SD.Tax + SD.CessAmount AS Total
+        FROM R_SalesMaster SM
+        INNER JOIN R_SalesDetail SD ON SD.MasterID = SM.GuID
+        INNER JOIN restaurant.Product PM ON PM.GuID = SD.ProductId
+        INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.GuID AND PPD.BranchID = @BranchID
+        INNER JOIN R_GroupEntry GE ON GE.Guid = PPD.GroupID
+        LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.GuID
+        LEFT OUTER JOIN R_Counter C ON SM.CounterID = C.GuID
+        LEFT OUTER JOIN R_User U ON U.GuID = SM.WaiterID
+        WHERE SM.Refund = 0 AND SM.Deleted = 0 AND SM.Cancelled = 0
+          AND PM.MenuItem = 1
+          AND (SD.ProductId = @ProductID OR @ProductID IS NULL)
+          AND (S.GuID = @SectionID OR @SectionID IS NULL)
+          AND (C.GuID = @CounterID OR @CounterID IS NULL)
+          AND (SM.WaiterID = @UserID OR @UserID IS NULL)
+          AND (PPD.CategoryID = @CategoryID OR @CategoryID IS NULL)
+          AND (GE.Guid = @GroupID OR @GroupID IS NULL)
+          AND (SM.TransactionDate >= @FromDate OR @FromDate IS NULL)
+          AND (SM.TransactionDate < @R_ToDate OR @ToDate IS NULL)
+          AND (SM.BranchID = @BranchID OR @BranchID IS NULL)
+
+        UNION ALL
+
+        SELECT SD.ProductId AS ProductID, SD.Quantity,
+               ((SD.UnitRate * SD.Quantity) - SD.Discount) + SD.Tax + SD.CessAmount AS Total
+        FROM R_SalesTempMaster SM
+        INNER JOIN R_SalesTempDetail SD ON SD.MasterID = SM.GuID
+        INNER JOIN restaurant.Product PM ON PM.GuID = SD.ProductId
+        INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.GuID AND PPD.BranchID = @BranchID
+        INNER JOIN R_GroupEntry GE ON GE.Guid = PPD.GroupID
+        LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.GuID
+        LEFT OUTER JOIN R_Counter C ON SM.CounterID = C.GuID
+        LEFT OUTER JOIN R_User U ON U.GuID = SM.WaiterID
+        WHERE SM.Refund = 0 AND SM.Deleted = 0 AND SM.Cancelled = 0
+          AND PM.MenuItem = 1
+          AND (SD.ProductId = @ProductID OR @ProductID IS NULL)
+          AND (S.GuID = @SectionID OR @SectionID IS NULL)
+          AND (C.GuID = @CounterID OR @CounterID IS NULL)
+          AND (SM.WaiterID = @UserID OR @UserID IS NULL)
+          AND (PPD.CategoryID = @CategoryID OR @CategoryID IS NULL)
+          AND (GE.Guid = @GroupID OR @GroupID IS NULL)
+          AND (SM.TransactionDate >= @FromDate OR @FromDate IS NULL)
+          AND (SM.TransactionDate < @R_ToDate OR @ToDate IS NULL)
+          AND (SM.BranchID = @BranchID OR @BranchID IS NULL)
+    ) SoldDetail
+    GROUP BY ProductID
+
+    SELECT ProductID, GuID AS MasterGuID
+    INTO #ICR_LatestBOQ
+    FROM
+    (
+        SELECT ProductID, GuID, ROW_NUMBER() OVER (PARTITION BY ProductID ORDER BY BOQdate DESC, ID DESC) AS rn
+        FROM restaurant.Inv_ProductBOQMaster
+        WHERE Deleted = 0
+    ) X
+    WHERE rn = 1
+
+    -- Result set 1: item-level sales summary (only menu items with an active BOQ recipe)
+    SELECT
+        LB.ProductID,
+        P.Name AS Product,
+        U.Name AS UnitName,
+        SI.Quantity,
+        CASE WHEN SI.Quantity <> 0 THEN SI.Total / SI.Quantity ELSE 0 END AS Rate,
+        SI.Total
+    FROM #ICR_SoldItems SI
+    INNER JOIN #ICR_LatestBOQ LB ON LB.ProductID = SI.ProductID
+    INNER JOIN restaurant.Product P ON P.GuID = SI.ProductID
+    LEFT OUTER JOIN dbo.R_Unit U ON U.GuID = P.UnitID
+    ORDER BY P.Name
+
+    -- Result set 2: raw-material consumption per finished item (recipe qty x qty sold)
+    SELECT
+        ROW_NUMBER() OVER (PARTITION BY LB.ProductID ORDER BY RP.Name) AS SlNo,
+        LB.ProductID AS FinishedProductID,
+        RP.Name AS Product,
+        RU.Name AS UnitName,
+        (BD.Quantity * SI.Quantity) AS Quantity,
+        BD.Cost AS Rate,
+        (BD.Quantity * SI.Quantity * BD.Cost) AS Total
+    FROM #ICR_SoldItems SI
+    INNER JOIN #ICR_LatestBOQ LB ON LB.ProductID = SI.ProductID
+    INNER JOIN restaurant.Inv_ProductBOQDetail BD ON BD.MasterID = LB.MasterGuID AND BD.Deleted = 0
+    INNER JOIN restaurant.Product RP ON RP.GuID = BD.ProductID
+    LEFT OUTER JOIN dbo.R_Unit RU ON RU.GuID = BD.UnitId
+    ORDER BY LB.ProductID, RP.Name
+
+    DROP TABLE #ICR_SoldItems
+    DROP TABLE #ICR_LatestBOQ
+END
+GO
+
+-- "Consumption Report based on Menu Items": same recipe x sales computation as
+-- Report_ItemWiseConsumptionReport, but flattened -- one row per raw material,
+-- summed across every qualifying menu item sold in the period. Because the same
+-- raw material can appear in multiple recipes with different Cost snapshots,
+-- Rate is derived as Total / Quantity (quantity-weighted average) so the sheet's
+-- Quantity x Rate = Total identity still holds.
+CREATE OR ALTER PROCEDURE [restaurant].[Report_MenuItemConsumptionReport]
+(
+    @BranchID    VARCHAR(MAX) = NULL,
+    @SectionID   VARCHAR(MAX) = NULL,
+    @CounterID   VARCHAR(MAX) = NULL,
+    @ProductID   VARCHAR(MAX) = NULL,
+    @CategoryID  VARCHAR(MAX) = NULL,
+    @GroupID     VARCHAR(MAX) = NULL,
+    @UserID      VARCHAR(MAX) = NULL,
+    @FromDate    DATE = NULL,
+    @ToDate      DATE = NULL,
+    @IsDayClosed INT  = NULL
+)
+AS
+BEGIN
+    SET ARITHABORT ON
+    SET XACT_ABORT ON
+    SET NOCOUNT ON
+
+    DECLARE @R_ToDate DATE = DATEADD(DAY, 1, @ToDate)
+
+    IF OBJECT_ID('tempdb..#MCR_SoldItems') IS NOT NULL DROP TABLE #MCR_SoldItems
+    IF OBJECT_ID('tempdb..#MCR_LatestBOQ') IS NOT NULL DROP TABLE #MCR_LatestBOQ
+
+    SELECT ProductID, SUM(Quantity) AS Quantity
+    INTO #MCR_SoldItems
+    FROM
+    (
+        SELECT SD.ProductId AS ProductID, SD.Quantity
+        FROM R_SalesMaster SM
+        INNER JOIN R_SalesDetail SD ON SD.MasterID = SM.GuID
+        INNER JOIN restaurant.Product PM ON PM.GuID = SD.ProductId
+        INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.GuID AND PPD.BranchID = @BranchID
+        INNER JOIN R_GroupEntry GE ON GE.Guid = PPD.GroupID
+        LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.GuID
+        LEFT OUTER JOIN R_Counter C ON SM.CounterID = C.GuID
+        LEFT OUTER JOIN R_User U ON U.GuID = SM.WaiterID
+        WHERE SM.Refund = 0 AND SM.Deleted = 0 AND SM.Cancelled = 0
+          AND PM.MenuItem = 1
+          AND (SD.ProductId = @ProductID OR @ProductID IS NULL)
+          AND (S.GuID = @SectionID OR @SectionID IS NULL)
+          AND (C.GuID = @CounterID OR @CounterID IS NULL)
+          AND (SM.WaiterID = @UserID OR @UserID IS NULL)
+          AND (PPD.CategoryID = @CategoryID OR @CategoryID IS NULL)
+          AND (GE.Guid = @GroupID OR @GroupID IS NULL)
+          AND (SM.TransactionDate >= @FromDate OR @FromDate IS NULL)
+          AND (SM.TransactionDate < @R_ToDate OR @ToDate IS NULL)
+          AND (SM.BranchID = @BranchID OR @BranchID IS NULL)
+
+        UNION ALL
+
+        SELECT SD.ProductId AS ProductID, SD.Quantity
+        FROM R_SalesTempMaster SM
+        INNER JOIN R_SalesTempDetail SD ON SD.MasterID = SM.GuID
+        INNER JOIN restaurant.Product PM ON PM.GuID = SD.ProductId
+        INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.GuID AND PPD.BranchID = @BranchID
+        INNER JOIN R_GroupEntry GE ON GE.Guid = PPD.GroupID
+        LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.GuID
+        LEFT OUTER JOIN R_Counter C ON SM.CounterID = C.GuID
+        LEFT OUTER JOIN R_User U ON U.GuID = SM.WaiterID
+        WHERE SM.Refund = 0 AND SM.Deleted = 0 AND SM.Cancelled = 0
+          AND PM.MenuItem = 1
+          AND (SD.ProductId = @ProductID OR @ProductID IS NULL)
+          AND (S.GuID = @SectionID OR @SectionID IS NULL)
+          AND (C.GuID = @CounterID OR @CounterID IS NULL)
+          AND (SM.WaiterID = @UserID OR @UserID IS NULL)
+          AND (PPD.CategoryID = @CategoryID OR @CategoryID IS NULL)
+          AND (GE.Guid = @GroupID OR @GroupID IS NULL)
+          AND (SM.TransactionDate >= @FromDate OR @FromDate IS NULL)
+          AND (SM.TransactionDate < @R_ToDate OR @ToDate IS NULL)
+          AND (SM.BranchID = @BranchID OR @BranchID IS NULL)
+    ) SoldDetail
+    GROUP BY ProductID
+
+    SELECT ProductID, GuID AS MasterGuID
+    INTO #MCR_LatestBOQ
+    FROM
+    (
+        SELECT ProductID, GuID, ROW_NUMBER() OVER (PARTITION BY ProductID ORDER BY BOQdate DESC, ID DESC) AS rn
+        FROM restaurant.Inv_ProductBOQMaster
+        WHERE Deleted = 0
+    ) X
+    WHERE rn = 1
+
+    ;WITH RawMaterialConsumption AS
+    (
+        SELECT
+            BD.ProductID AS RawMaterialProductID,
+            SUM(BD.Quantity * SI.Quantity) AS Quantity,
+            SUM(BD.Quantity * SI.Quantity * BD.Cost) AS Total
+        FROM #MCR_SoldItems SI
+        INNER JOIN #MCR_LatestBOQ LB ON LB.ProductID = SI.ProductID
+        INNER JOIN restaurant.Inv_ProductBOQDetail BD ON BD.MasterID = LB.MasterGuID AND BD.Deleted = 0
+        GROUP BY BD.ProductID
+    )
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY RP.Name) AS SlNo,
+        RP.Name AS Product,
+        RU.Name AS UnitName,
+        RMC.Quantity,
+        CASE WHEN RMC.Quantity <> 0 THEN RMC.Total / RMC.Quantity ELSE 0 END AS Rate,
+        RMC.Total
+    FROM RawMaterialConsumption RMC
+    INNER JOIN restaurant.Product RP ON RP.GuID = RMC.RawMaterialProductID
+    LEFT OUTER JOIN dbo.R_Unit RU ON RU.GuID = RP.UnitID
+    ORDER BY RP.Name
+
+    DROP TABLE #MCR_SoldItems
+    DROP TABLE #MCR_LatestBOQ
+END
+GO
+
+PRINT 'Section X complete.';
 GO
