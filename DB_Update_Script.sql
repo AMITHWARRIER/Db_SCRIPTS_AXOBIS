@@ -6691,36 +6691,37 @@ CREATE OR ALTER PROCEDURE [restaurant].[Sync_INVProductionBOQ_Insert]
 AS    
 BEGIN TRY    
     BEGIN TRANSACTION    
-     MERGE restaurant.Inv_ProductBOQMaster AS BM USING    
-     (    
-    SELECT     
-    [GuID],[BOQdate],Totalqty,ProductID,AvgCost,NetCost,Deleted,    
-    CreatedUser,CreatedDate,UpdatedUser,UpdatedDate    
-    FROM @UDT_INVProductionBOQ    
-     )UBM ON UBM.[GuID] = BM.[GuID]    
-     WHEN MATCHED THEN     
-           UPDATE SET    
-      [GuID] = UBM.[GuID]    
-     ,[BOQdate] = UBM.[BOQdate]    
-     ,Totalqty = UBM.Totalqty    
-     ,ProductID = UBM.ProductID    
-     ,AvgCost = UBM.AvgCost    
-     ,NetCost= UBM.NetCost    
-     ,Deleted= UBM.Deleted           
-     ,CreatedUser = UBM.CreatedUser    
-     ,CreatedDate = UBM.CreatedDate    
-     ,UpdatedUser=UBM.UpdatedUser    
-     ,UpdatedDate=UBM.UpdatedDate    
-     WHEN NOT MATCHED THEN     
-     INSERT     
-     (    
-    [GuID],[BOQdate],Totalqty,ProductID,AvgCost,NetCost,Deleted,    
-    CreatedUser,CreatedDate,UpdatedUser,UpdatedDate)    
-     VALUES    
-     (    
-    UBM.[GuID],UBM.[BOQdate],UBM.Totalqty,UBM.ProductID,UBM.AvgCost,UBM.NetCost,UBM.Deleted,    
-    UBM.CreatedUser,UBM.CreatedDate,UBM.UpdatedUser,UBM.UpdatedDate    
-     );    
+     MERGE restaurant.Inv_ProductBOQMaster AS BM USING
+     (
+    SELECT
+    [GuID],[BOQdate],Totalqty,ProductID,BranchID,AvgCost,NetCost,Deleted,
+    CreatedUser,CreatedDate,UpdatedUser,UpdatedDate
+    FROM @UDT_INVProductionBOQ
+     )UBM ON UBM.[GuID] = BM.[GuID]
+     WHEN MATCHED THEN
+           UPDATE SET
+      [GuID] = UBM.[GuID]
+     ,[BOQdate] = UBM.[BOQdate]
+     ,Totalqty = UBM.Totalqty
+     ,ProductID = UBM.ProductID
+     ,BranchID = UBM.BranchID
+     ,AvgCost = UBM.AvgCost
+     ,NetCost= UBM.NetCost
+     ,Deleted= UBM.Deleted
+     ,CreatedUser = UBM.CreatedUser
+     ,CreatedDate = UBM.CreatedDate
+     ,UpdatedUser=UBM.UpdatedUser
+     ,UpdatedDate=UBM.UpdatedDate
+     WHEN NOT MATCHED THEN
+     INSERT
+     (
+    [GuID],[BOQdate],Totalqty,ProductID,BranchID,AvgCost,NetCost,Deleted,
+    CreatedUser,CreatedDate,UpdatedUser,UpdatedDate)
+     VALUES
+     (
+    UBM.[GuID],UBM.[BOQdate],UBM.Totalqty,UBM.ProductID,UBM.BranchID,UBM.AvgCost,UBM.NetCost,UBM.Deleted,
+    UBM.CreatedUser,UBM.CreatedDate,UBM.UpdatedUser,UBM.UpdatedDate
+     );
 
      MERGE restaurant.Inv_ProductBOQDetail AS BD USING    
      (    
