@@ -10039,3 +10039,114 @@ GO
 
 PRINT 'Section X complete.';
 GO
+
+-- ============================================================
+-- Section Y - WebMenu entries for Consumption Report (2026-08-08)
+-- ============================================================
+-- Registers the two Consumption Report screens (Section X's stored
+-- procedures / LoungeWebAPI's ItemWiseConsumptionReport and
+-- MenuItemConsumptionReport controller routes) in restaurant.WebMenu so
+-- they appear in the Reports menu. Follows the existing Wastage Detail/
+-- Wastage Summary placement pattern exactly: the per-item detail report
+-- sits directly under REPORTS (ParentID=5, IsSubMenu=0), the flat
+-- consolidated report sits under POS SUMMARY (ParentID=7, IsSubMenu=1).
+-- ID is IDENTITY -- keyed by GuID for idempotency, same convention as
+-- Section A2's seed data.
+PRINT 'Section Y: WebMenu entries for Consumption Report...';
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    -- ParentID is a self-referencing IDENTITY value, not stable across databases
+    -- (each DB's WebMenu rows were seeded/edited independently over time) -- look
+    -- the parents up by name rather than hardcoding the IDs seen on defaultDB.
+    DECLARE @ReportsMenuID INT = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name = 'REPORTS' AND ParentID = 0);
+    DECLARE @PosSummaryMenuID INT = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name = 'POS SUMMARY' AND ParentID = @ReportsMenuID);
+
+    IF @ReportsMenuID IS NOT NULL AND NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A01')
+        INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, Class, IsSubMenu, SpanClass, btnClass, OnClick, ControllerName, IsActive)
+        VALUES ('7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A01', 'Item Wise Consumption Report', @ReportsMenuID, '/Reports/ItemWiseConsumptionReport/Index', 'PlusCircle', NULL, 0, NULL, NULL, NULL, 'ItemWiseConsumptionReport', 1);
+
+    IF @PosSummaryMenuID IS NOT NULL AND NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02')
+        INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, Class, IsSubMenu, SpanClass, btnClass, OnClick, ControllerName, IsActive)
+        VALUES ('7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02', 'Menu Item Consumption Report', @PosSummaryMenuID, '/Reports/MenuItemConsumptionReport/Index', 'PlusCircle', NULL, 1, NULL, NULL, NULL, 'MenuItemConsumptionReport', 1);
+
+    PRINT 'Inserted Consumption Report WebMenu entries successfully.';
+END
+ELSE
+BEGIN
+    PRINT 'restaurant.WebMenu not found -- skipped Consumption Report menu entries.';
+END
+GO
+
+PRINT 'Section Y complete.';
+GO
+
+-- ============================================================
+-- Section Z - Generic backfill of missing WebMenu entries from defaultDB (2026-08-08)
+-- ============================================================
+-- Generic, additive "diff and backfill" for restaurant.WebMenu, so future menu
+-- additions to defaultDB (new reports/features) reach every other database the
+-- next time this script runs, WITHOUT hand-writing a new IF NOT EXISTS block
+-- per feature (see Section Y for that older, one-off pattern -- this supersedes
+-- the need for more of those).
+--
+-- Only ever INSERTs rows missing here (matched by the stable GuID) -- never
+-- deletes or updates anything that already exists, so a customer's own
+-- customizations (disabled items via IsActive=0, custom entries) are never
+-- touched. This is deliberately NOT the old WEBMENU_INSERT.sql behaviour
+-- (that one does DELETE + full replace from defaultDB, which would wipe
+-- per-customer differences on every run -- not used here on purpose).
+--
+-- ParentID is a per-database IDENTITY value, not a stable key across DBs, so
+-- each source row's parent is resolved by matching the PARENT's GuID against
+-- this database's WebMenu, not by copying the raw ParentID number. Two passes:
+-- top-level items (ParentID=0) first, then children -- so a brand-new
+-- top-level category and its children can both backfill in the same run.
+--
+-- Requires defaultDB to be reachable from the same SQL Server instance as the
+-- target database (cross-database query) -- same assumption the legacy
+-- WEBMENU_INSERT.sql script made. Skips cleanly if that's not the case, if
+-- this IS defaultDB, or if restaurant.WebMenu doesn't exist here.
+PRINT 'Section Z: Backfilling missing WebMenu entries from defaultDB...';
+GO
+
+IF DB_NAME() <> 'defaultDB'
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.databases WHERE name = 'defaultDB')
+BEGIN
+    DECLARE @TopLevelAdded INT, @ChildrenAdded INT;
+
+    -- Pass 1: top-level categories (ParentID = 0 on defaultDB) missing here.
+    INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, Class, IsSubMenu, SpanClass, btnClass, OnClick, ControllerName, IsActive)
+    SELECT Src.GuID, Src.Name, 0, Src.Url, Src.Icon, Src.Class, Src.IsSubMenu, Src.SpanClass, Src.btnClass, Src.OnClick, Src.ControllerName, Src.IsActive
+    FROM defaultDB.restaurant.WebMenu Src
+    WHERE Src.ParentID = 0
+      AND NOT EXISTS (SELECT 1 FROM restaurant.WebMenu Tgt WHERE Tgt.GuID = Src.GuID);
+    SET @TopLevelAdded = @@ROWCOUNT;
+
+    -- Pass 2: everything else, resolving ParentID by the parent's GuID (now
+    -- includes any brand-new top-level parent Pass 1 just added). A row whose
+    -- parent can't be resolved locally (parent also missing and itself has a
+    -- missing parent, 3+ levels deep) is skipped rather than inserted with a
+    -- guessed/invalid ParentID -- rare in practice given this menu is at most
+    -- 3 levels deep, but safer than corrupting the tree.
+    INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, Class, IsSubMenu, SpanClass, btnClass, OnClick, ControllerName, IsActive)
+    SELECT Src.GuID, Src.Name, LocalParent.ID, Src.Url, Src.Icon, Src.Class, Src.IsSubMenu, Src.SpanClass, Src.btnClass, Src.OnClick, Src.ControllerName, Src.IsActive
+    FROM defaultDB.restaurant.WebMenu Src
+    INNER JOIN defaultDB.restaurant.WebMenu SrcParent ON SrcParent.ID = Src.ParentID
+    INNER JOIN restaurant.WebMenu LocalParent ON LocalParent.GuID = SrcParent.GuID
+    WHERE Src.ParentID <> 0
+      AND NOT EXISTS (SELECT 1 FROM restaurant.WebMenu Tgt WHERE Tgt.GuID = Src.GuID);
+    SET @ChildrenAdded = @@ROWCOUNT;
+
+    PRINT CONVERT(VARCHAR(10), @TopLevelAdded) + ' top-level and ' + CONVERT(VARCHAR(10), @ChildrenAdded) + ' child WebMenu entries backfilled from defaultDB.';
+END
+ELSE
+BEGIN
+    PRINT 'Skipped WebMenu backfill (this is defaultDB, restaurant.WebMenu is missing here, or defaultDB is unreachable from this server).';
+END
+GO
+
+PRINT 'Section Z complete.';
+GO
