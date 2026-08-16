@@ -107,6 +107,38 @@ END
 GO
 
 -- ============================================================
+-- SECTION A3: KASHKAN PHASE 2 — COMPLIMENTARY REASON (Req #5)
+-- ============================================================
+PRINT 'Section A3: Complimentary Reason setup...';
+GO
+
+IF NOT EXISTS (SELECT 1 FROM [dbo].[R_Settings] WHERE [Key] = 'IsComplimentaryReasonEnabled')
+BEGIN
+    INSERT INTO [dbo].[R_Settings] ([Key], [Value])
+    VALUES ('IsComplimentaryReasonEnabled', 'FALSE');
+    PRINT 'Inserted setting IsComplimentaryReasonEnabled successfully.';
+END
+ELSE
+BEGIN
+    PRINT 'Setting IsComplimentaryReasonEnabled already exists.';
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_ReasonType]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM dbo.R_ReasonType WHERE GuID = '3B1F5C2A-6D8E-4F1B-9A3C-7E2D4B5F6A8C')
+    BEGIN
+        INSERT INTO dbo.R_ReasonType (Name, GuID, Deleted) VALUES ('Complimentary', '3B1F5C2A-6D8E-4F1B-9A3C-7E2D4B5F6A8C', 0);
+        PRINT 'Inserted R_ReasonType row Complimentary successfully.';
+    END
+    ELSE
+        PRINT 'R_ReasonType row Complimentary already exists.';
+END
+ELSE
+    PRINT 'Skipped R_ReasonType seed (table does not exist on this database).';
+GO
+
+-- ============================================================
 -- SECTION B: TABLE SCHEMA CHANGES
 -- ============================================================
 PRINT 'Section B: Table schema changes...';
@@ -556,6 +588,71 @@ BEGIN
 END
 GO
 
+-- Kashkan Phase 2: Complimentary Reason (Req #5) — ComplimentaryReason column, mirrors
+-- CancelReason/ComplementaryTotal which already exist on both R_SalesMaster and
+-- R_SalesTempMaster since SalesMaster.Insert()/Update() write to whichever table
+-- IsTemp resolves to.
+-- dbo.R_SalesMaster
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesMaster]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'ComplimentaryReason')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD ComplimentaryReason varchar(250) NULL;
+        PRINT 'Added column ComplimentaryReason to dbo.R_SalesMaster successfully.';
+    END
+END
+GO
+
+-- dbo.R_SalesTempMaster
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesTempMaster]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'ComplimentaryReason')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD ComplimentaryReason varchar(250) NULL;
+        PRINT 'Added column ComplimentaryReason to dbo.R_SalesTempMaster successfully.';
+    END
+END
+GO
+
+-- Kashkan Phase 5: Order Timing + Captain/Waiter Report (Req #4) —
+-- OrderOpenedDateTime/OrderClosedDateTime, same two tables as
+-- ComplimentaryReason above, for the same reason (Insert()/Update()
+-- write to whichever table IsTemp resolves to). Opened is stamped
+-- once at Insert() time; Closed is stamped the first time IsPending
+-- transitions 1->0 (payment covers total, or Cancel), guarded so a
+-- later unrelated edit never overwrites the original closed time.
+-- dbo.R_SalesMaster
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesMaster]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'OrderOpenedDateTime')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD OrderOpenedDateTime datetime NULL;
+        PRINT 'Added column OrderOpenedDateTime to dbo.R_SalesMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'OrderClosedDateTime')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD OrderClosedDateTime datetime NULL;
+        PRINT 'Added column OrderClosedDateTime to dbo.R_SalesMaster successfully.';
+    END
+END
+GO
+
+-- dbo.R_SalesTempMaster
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesTempMaster]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'OrderOpenedDateTime')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD OrderOpenedDateTime datetime NULL;
+        PRINT 'Added column OrderOpenedDateTime to dbo.R_SalesTempMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'OrderClosedDateTime')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD OrderClosedDateTime datetime NULL;
+        PRINT 'Added column OrderClosedDateTime to dbo.R_SalesTempMaster successfully.';
+    END
+END
+GO
+
 -- dbo.R_SalesDetail
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesDetail]') AND type = 'U')
 BEGIN
@@ -605,7 +702,7 @@ AS
 	TabID,Merged,Pax,Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
 	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
 	TabOrderNo,convert(BIGINT,Version)[Version],UpdatedUser
-	,SD.[GuID] AS DeliveryID, OrderType
+	,SD.[GuID] AS DeliveryID, OrderType, OrderOpenedDateTime, OrderClosedDateTime
 	FROM [R_SalesMaster] SM
 	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
 	WHERE [Version] > @Version
@@ -936,6 +1033,70 @@ BEGIN
 END
 ELSE
     PRINT 'Table dbo.R_EinvoiceStatus already exists.';
+GO
+
+-- Kashkan Phase 3: Item Void / Quantity-Decrease Reason (Req #2).
+-- Voided items are removed from the billing grid before the order is ever
+-- saved, so there is no R_SalesDetail row to attach a VoidReason column to
+-- (confirmed no SP references the orphaned restaurant.SaleED UDT, and
+-- R_SalesDetail/R_SalesTempDetail carry no IsVoid/VoidReason columns today
+-- -- extending them would be dead weight). A standalone audit-log table,
+-- written at the moment of void regardless of whether the order is ever
+-- saved, is the correct fit and is what the Void Report (Req #3) queries.
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_VoidLog]') AND type in (N'U'))
+BEGIN
+    CREATE TABLE [dbo].[R_VoidLog](
+        [ID] [int] IDENTITY(1,1) NOT NULL,
+        [GuID] [uniqueidentifier] NOT NULL,
+        [MasterID] [uniqueidentifier] NULL,
+        [BillNo] [varchar](50) NULL,
+        [SectionID] [uniqueidentifier] NULL,
+        [CounterID] [uniqueidentifier] NULL,
+        [BranchID] [uniqueidentifier] NULL,
+        [ProductID] [uniqueidentifier] NULL,
+        [ProductName] [varchar](200) NULL,
+        [Quantity] [decimal](18, 3) NULL,
+        [UnitRate] [money] NULL,
+        [Reason] [varchar](250) NULL,
+        [VoidedByUserID] [uniqueidentifier] NULL,
+        [VoidedByUserName] [varchar](100) NULL,
+        [VoidedDate] [datetime] NOT NULL,
+        [CompanyID] [int] NULL,
+        [FinancialYearID] [decimal](18, 0) NULL,
+    PRIMARY KEY CLUSTERED ([ID] ASC)
+    WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF,
+          ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+    ) ON [PRIMARY];
+    PRINT 'Created Table dbo.R_VoidLog successfully.';
+END
+ELSE
+    PRINT 'Table dbo.R_VoidLog already exists.';
+GO
+
+IF NOT EXISTS (SELECT 1 FROM [dbo].[R_Settings] WHERE [Key] = 'IsVoidReasonEnabled')
+BEGIN
+    INSERT INTO [dbo].[R_Settings] ([Key], [Value])
+    VALUES ('IsVoidReasonEnabled', 'FALSE');
+    PRINT 'Inserted setting IsVoidReasonEnabled successfully.';
+END
+ELSE
+BEGIN
+    PRINT 'Setting IsVoidReasonEnabled already exists.';
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_ReasonType]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM dbo.R_ReasonType WHERE GuID = '9C2E4A7B-1F3D-4E6A-8B5C-2D9F0A1E3C7B')
+    BEGIN
+        INSERT INTO dbo.R_ReasonType (Name, GuID, Deleted) VALUES ('Void', '9C2E4A7B-1F3D-4E6A-8B5C-2D9F0A1E3C7B', 0);
+        PRINT 'Inserted R_ReasonType row Void successfully.';
+    END
+    ELSE
+        PRINT 'R_ReasonType row Void already exists.';
+END
+ELSE
+    PRINT 'Skipped R_ReasonType seed (table does not exist on this database).';
 GO
 
 -- ============================================================
@@ -1934,8 +2095,8 @@ BEGIN
     SET NOCOUNT ON;
     BEGIN TRY
         BEGIN TRANSACTION;
-        INSERT INTO R_SalesTempMaster([GuID],[No],[Date],[SectionID],[CounterID],[BillTime],[CustomerID],[Merged],[Total],[RTotal],[Tax],[Cash],[Card],[CardNo],[FxPaid],[FxTypeID],[FxRate],[FxAmount],[CustomerCredit],[Discount],[DiscountPercentage],[ProdDiscount],[RoundOff],[FinancialYearID],[UserID],[CreatedBy],[Remarks],[CompanyID],[LastUpdate],[BranchID],[Deleted],[Refund],[TransactionDate],[IsPending],[Cancelled],[WaiterID],[CustomerGSTNo],[BillNo],[SeriesType],[TableID],[CancelReason],[Pax],[TabBillNo],[Redeem],[RedeemPoints],[NoOfChairs],[TabID],[ShiftNumber],IsShiftClosed,CardID,CessAmount,IsComplementary,ComplementaryTotal,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,UpdatedUser,LevyTotal,OrderType)
-        SELECT [GuID],[No],[Date],[SectionID],[CounterID],[BillTime],[CustomerID],[Merged],[Total],[RTotal],[Tax],[Cash],[Card],[CardNo],[FxPaid],[FxTypeID],[FxRate],[FxAmount],[CustomerCredit],[Discount],[DiscountPercentage],[ProdDiscount],[RoundOff],[FinancialYearID],[UserID],[CreatedBy],[Remarks],[CompanyID],[LastUpdate],[BranchID],[Deleted],[Refund],[TransactionDate],[IsPending],[Cancelled],[WaiterID],[CustomerGSTNo],[BillNo],[SeriesType],[TableID],[CancelReason],[Pax],[TabBillNo],[Redeem],[RedeemPoints],[NoOfChairs],[TabID],[ShiftNumber],IsShiftClosed,CardID,CessAmount,IsComplementary,ComplementaryTotal,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,UpdatedUser,LevyTotal,OrderType
+        INSERT INTO R_SalesTempMaster([GuID],[No],[Date],[SectionID],[CounterID],[BillTime],[CustomerID],[Merged],[Total],[RTotal],[Tax],[Cash],[Card],[CardNo],[FxPaid],[FxTypeID],[FxRate],[FxAmount],[CustomerCredit],[Discount],[DiscountPercentage],[ProdDiscount],[RoundOff],[FinancialYearID],[UserID],[CreatedBy],[Remarks],[CompanyID],[LastUpdate],[BranchID],[Deleted],[Refund],[TransactionDate],[IsPending],[Cancelled],[WaiterID],[CustomerGSTNo],[BillNo],[SeriesType],[TableID],[CancelReason],[Pax],[TabBillNo],[Redeem],[RedeemPoints],[NoOfChairs],[TabID],[ShiftNumber],IsShiftClosed,CardID,CessAmount,IsComplementary,ComplementaryTotal,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,UpdatedUser,LevyTotal,OrderType,OrderOpenedDateTime,OrderClosedDateTime)
+        SELECT [GuID],[No],[Date],[SectionID],[CounterID],[BillTime],[CustomerID],[Merged],[Total],[RTotal],[Tax],[Cash],[Card],[CardNo],[FxPaid],[FxTypeID],[FxRate],[FxAmount],[CustomerCredit],[Discount],[DiscountPercentage],[ProdDiscount],[RoundOff],[FinancialYearID],[UserID],[CreatedBy],[Remarks],[CompanyID],[LastUpdate],[BranchID],[Deleted],[Refund],[TransactionDate],[IsPending],[Cancelled],[WaiterID],[CustomerGSTNo],[BillNo],[SeriesType],[TableID],[CancelReason],[Pax],[TabBillNo],[Redeem],[RedeemPoints],[NoOfChairs],[TabID],[ShiftNumber],IsShiftClosed,CardID,CessAmount,IsComplementary,ComplementaryTotal,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,UpdatedUser,LevyTotal,OrderType,OrderOpenedDateTime,OrderClosedDateTime
         FROM R_SalesMaster WHERE Cancelled = 1 OR (IsPending = 0 AND CAST(TransactionDate AS DATE) = @ClosingDate);
         INSERT INTO R_SalesTempDetail([GuID],[MasterID],[ProductID],[Quantity],[BaseQuantity],[UnitRate],[TaxID],[TaxPercentage],[Tax],[DiscPercentage],[Discount],[Merged],[UnitID],[ItemTypeID],[Deleted],[IsTaxIncludedInPrice],[Cancelled],[CessAmount],[PromoID],[Levy],[LevyPercentage],ChairNo,CourseNo)
         SELECT D.[GuID],D.[MasterID],D.[ProductID],D.[Quantity],D.[BaseQuantity],D.[UnitRate],D.[TaxID],D.[TaxPercentage],D.[Tax],D.[DiscPercentage],D.[Discount],D.[Merged],D.[UnitID],D.[ItemTypeID],D.[Deleted],D.[IsTaxIncludedInPrice],D.[Cancelled],D.[CessAmount],D.[PromoID],D.[Levy],D.[LevyPercentage],D.ChairNo,D.CourseNo
@@ -2176,38 +2337,18 @@ GO
 PRINT 'Created or altered SP Sync_SalesTempLog_Insert.';
 GO
 
--- SP: Sync_EinvoiceStatus_Insert (File 1 version — CREATE OR ALTER with MERGE)
-CREATE OR ALTER PROCEDURE [restaurant].[Sync_EinvoiceStatus_Insert]
-    @UDT_R_EinvoiceStatus [restaurant].[UDT_R_EinvoiceStatus] READONLY
-AS
-BEGIN
-    SET NOCOUNT ON;
-    MERGE dbo.R_EinvoiceStatus AS target
-    USING @UDT_R_EinvoiceStatus AS source ON (target.GuID = source.GuID)
-    WHEN MATCHED THEN UPDATE SET
-        target.BillNo=source.BillNo,target.BillDateTime=source.BillDateTime,target.xmlFileName=source.xmlFileName,
-        target.ResponseStatus=source.ResponseStatus,target.ResponseMsg=source.ResponseMsg,
-        target.InvoiceType=source.InvoiceType,target.InvoiceHash=source.InvoiceHash,
-        target.ReSubmitStatus=source.ReSubmitStatus,target.Version=source.Version
-    WHEN NOT MATCHED THEN INSERT (GuID,BillNo,BillDateTime,xmlFileName,ResponseStatus,ResponseMsg,InvoiceType,InvoiceHash,ReSubmitStatus,Version)
-    VALUES (source.GuID,source.BillNo,source.BillDateTime,source.xmlFileName,source.ResponseStatus,source.ResponseMsg,source.InvoiceType,source.InvoiceHash,source.ReSubmitStatus,source.Version);
-END;
-GO
-PRINT 'Created or altered SP Sync_EinvoiceStatus_Insert.';
-GO
-
--- SP: Sync_EinvoiceStatus_GetAll
-CREATE OR ALTER PROCEDURE [restaurant].[Sync_EinvoiceStatus_GetAll]
-    @Version BIGINT = NULL
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SELECT GuID,BillNo,BillDateTime,xmlFileName,ResponseStatus,ResponseMsg,InvoiceType,InvoiceHash,ReSubmitStatus,Version
-    FROM dbo.R_EinvoiceStatus WHERE [Version] > @Version;
-END;
-GO
-PRINT 'Created or altered SP Sync_EinvoiceStatus_GetAll.';
-GO
+-- NOTE: Sync_EinvoiceStatus_Insert / Sync_EinvoiceStatus_GetAll used to be
+-- (re)defined here too ("File 1 version"), but that copy explicitly assigned
+-- R_EinvoiceStatus.Version (a rowversion/timestamp column), which SQL Server
+-- rejects outright once the table actually exists. On a brand-new DB this
+-- passed silently (deferred name resolution — the table doesn't exist yet at
+-- this point in the script), but it broke every subsequent replay of this
+-- script the moment the table was present, aborting the whole run partway
+-- through Section F. The only correct definitions are the later ones in
+-- Section O/P (search Sync_EinvoiceStatus_Insert), which correctly exclude
+-- Version and additionally add BranchID. Removed the stale/broken duplicate
+-- here rather than leave two competing definitions in the file (found via
+-- the Phase 4 Kashkan idempotency re-run, 2026-08-16).
 
 -- SP: Sync_Section_Insert (File 2 version — critical fix with all new columns)
 CREATE OR ALTER PROCEDURE [restaurant].[Sync_Section_Insert]
@@ -3607,6 +3748,1359 @@ END
 GO
 PRINT 'Created or altered SP Report_TimeBasedSalesDetailPaging.';
 GO
+
+-- ============================================================
+-- Phase 1 fix: running vs settled split (Req #1, #10)
+-- Root cause: @IsLiveSale / @StatusType parameters were declared
+-- but never referenced in the proc bodies, so dashboard/report
+-- totals always combined running + settled orders.
+-- Fix convention: NULL parameter = unfiltered (today's default,
+-- unchanged), explicit value = filtered. Running/settled is
+-- determined by SM.IsPending (0=settled,1=running), matching
+-- the same flag already used by [Status] CASE logic in
+-- Report_SalesStatusReport and by Day Close's pending exclusion.
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetSectionWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+			IF Object_id('TempDB.dbo.#SectionWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #SectionWiseSale
+			END
+
+			SELECT Section,SUM(BillTotal)BillTotal
+			INTO #SectionWiseSale
+			FROM (
+
+			SELECT S.[Name] Section
+			,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			--INTO #SectionWiseSale
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			--GROUP BY S.[Name]
+
+			UNION ALL
+
+			SELECT S.[Name] Section
+			,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			--GROUP BY S.[Name]
+			) AS T
+			GROUP BY Section
+
+			SELECT Section,BillTotal,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+			PERCENTAGE
+			FROM #SectionWiseSale
+GO
+PRINT 'Created or altered SP GetSectionWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetSubSectionWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @Section        VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+IF Object_id('TempDB.dbo.#SectionWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #SectionWiseSale
+			END
+
+			SELECT TransactionDate,Section,SUM(BillTotal)BillTotal
+			INTO #SectionWiseSale
+			FROM(
+			SELECT SM.TransactionDate,S.[Name] Section,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			--INTO #TempSectionWiseSale
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			--GROUP BY SM.TransactionDate,S.[Name]
+
+			UNION ALL
+
+			SELECT SM.TransactionDate,S.[Name] Section,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			--INTO #SectionWiseSale
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN restaurant.Section S ON SM.SectionID = S.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			--GROUP BY SM.TransactionDate,S.[Name]
+			) AS T
+			GROUP BY TransactionDate,Section
+
+			SELECT TransactionDate,Section,BillTotal,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+			PERCENTAGE
+			FROM #SectionWiseSale
+			WHERE (Section = @Section OR @Section IS NULL)
+GO
+PRINT 'Created or altered SP GetSubSectionWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetDateWiseSectionSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+SELECT TransactionDate,Section,SUM(BillTotal)BillTotal
+from(
+		SELECT TransactionDate,S.[Name] as Section,
+			(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) AS BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.[SectionID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+		UNION ALL
+
+		SELECT TransactionDate,S.[Name] as Section,
+			(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) AS BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.[SectionID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			)T
+			GROUP BY TransactionDate,Section
+			ORDER BY TransactionDate
+GO
+PRINT 'Created or altered SP GetDateWiseSectionSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetProductWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+			IF Object_id('TempDB.dbo.#GetProductWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #GetProductWiseSale
+			END
+		 SELECT Product,Total,Quantity,TransactionDate
+		 INTO #GetProductWiseSale
+		 FROM(
+					SELECT P.[Name] Product
+					,((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount) Total
+					,TransactionDate,SD.Quantity
+					--INTO #GetProductWiseSale
+					FROM R_SalesTempMaster SM
+					LEFT OUTER JOIN R_SalesTempDetail SD ON SD.[MasterID] = SM.[GuID]
+					LEFT OUTER JOIN restaurant.Product P ON P.[GuID] = SD.[ProductID]
+					WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+					AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+					AND SM.BranchID = @BranchID
+					AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+					UNION ALL
+
+					SELECT P.[Name] Product
+					,((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount) Total
+					,TransactionDate,SD.Quantity
+					FROM R_SalesMaster SM
+					LEFT OUTER JOIN R_SalesDetail SD ON SD.[MasterID] = SM.[GuID]
+					LEFT OUTER JOIN restaurant.Product P ON P.[GuID] = SD.[ProductID]
+					WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+							AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+							AND SM.BranchID = @BranchID
+							AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+		) AS TAD
+					SELECT Product,SUM(Total)BillTotal,SUM(Quantity)Quantity,TransactionDate
+					FROM #GetProductWiseSale
+					GROUP BY Product,TransactionDate
+GO
+PRINT 'Created or altered SP GetProductWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetWaiterWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+ SELECT Waiter,SUM(BillTotal)BillTotal
+ FROM
+ (
+ 	SELECT UM.[Name] Waiter
+			,SUM(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN R_User UM ON SM.[WaiterID] = UM.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY UM.[Name]
+
+			UNION ALL
+
+			SELECT UM.[Name] Waiter
+			,SUM(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN R_User UM ON SM.[WaiterID] = UM.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY UM.[Name]
+
+			)
+			AS T
+			GROUP BY Waiter
+GO
+PRINT 'Created or altered SP GetWaiterWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetDailySale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+SET NOCOUNT ON;
+
+ 	SELECT SM.TransactionDate,SUM(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY SM.TransactionDate
+			UNION ALL
+   SELECT SM.TransactionDate,SUM(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY SM.TransactionDate
+
+
+SET NOCOUNT OFF;
+GO
+PRINT 'Created or altered SP GetDailySale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetTop5WaiterWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+			 IF Object_id('TempDB.dbo.#TempTop5Waiter') IS NOT NULL
+				BEGIN
+					DROP TABLE #TempTop5Waiter
+			END
+
+			SELECT Waiter,SUM(BillTotal)BillTotal
+			INTO #TempTop5Waiter
+			FROM (
+			SELECT UM.[Name] Waiter,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN R_User UM ON SM.[WaiterID] = UM.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+			UNION ALL
+
+			SELECT UM.[Name] Waiter
+			,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN R_User UM ON SM.[WaiterID] = UM.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			) AS T
+			GROUP BY Waiter
+
+			SELECT TOP 5 Waiter,BillTotal,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+			PERCENTAGE
+			FROM #TempTop5Waiter
+			ORDER BY BillTotal DESC
+GO
+PRINT 'Created or altered SP GetTop5WaiterWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetLeast5WaiterWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+			 IF Object_id('TempDB.dbo.#Top5Waiter') IS NOT NULL
+				BEGIN
+					DROP TABLE #Top5Waiter
+			END
+
+			SELECT Waiter,SUM(BillTotal)BillTotal
+			INTO #Top5Waiter
+			FROM
+			(
+			SELECT UM.[Name] Waiter
+			,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN R_User UM ON SM.[WaiterID] = UM.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+			UNION ALL
+
+			SELECT UM.[Name] Waiter
+			,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+ ISNULL(DelAmount+ContAmount+OtherAmount,0)) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN R_User UM ON SM.[WaiterID] = UM.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			) AS T
+			GROUP BY Waiter
+
+			SELECT TOP 5 Waiter,BillTotal,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+			PERCENTAGE
+			FROM #Top5Waiter
+			ORDER BY BillTotal ASC
+GO
+PRINT 'Created or altered SP GetLeast5WaiterWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetTop5ItemWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+			IF Object_id('TempDB.dbo.#Top5ItemWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #Top5ItemWiseSale
+			END
+			SELECT Product,SUM(QUANTITY)QUANTITY,SUM(BillTotal)BillTotal
+			INTO #Top5ItemWiseSale
+			FROM (
+			SELECT PM.[Name] Product,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN R_SalesTempDetail SD ON SM.[GuID] = SD.MasterID
+			LEFT OUTER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY PM.[Name]
+
+			UNION ALL
+
+			SELECT PM.[Name] Product,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN R_SalesDetail SD ON SM.[GuID] = SD.MasterID
+			LEFT OUTER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY PM.[Name]
+			) AS T
+			GROUP BY Product
+
+			SELECT TOP 5 Product,BillTotal
+			FROM #Top5ItemWiseSale
+			ORDER BY BillTotal DESC
+GO
+PRINT 'Created or altered SP GetTop5ItemWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetLeast5ItemWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+			IF Object_id('TempDB.dbo.#Top5ItemWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #Top5ItemWiseSale
+			END
+			SELECT Product,SUM(QUANTITY)QUANTITY,SUM(BillTotal)BillTotal
+			INTO #Top5ItemWiseSale
+			FROM
+			(
+			SELECT PM.[Name] Product,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN R_SalesTempDetail SD ON SM.[GuID] = SD.MasterID
+			LEFT OUTER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY PM.[Name]
+
+			UNION ALL
+
+			SELECT PM.[Name] Product,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN R_SalesDetail SD ON SM.[GuID] = SD.MasterID
+			LEFT OUTER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY PM.[Name]
+			) AS T
+			GROUP BY Product
+
+			SELECT TOP 5 Product,BillTotal
+			FROM #Top5ItemWiseSale
+			ORDER BY BillTotal ASC
+GO
+PRINT 'Created or altered SP GetLeast5ItemWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetTop5CategoryWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+		IF Object_id('TempDB.dbo.#Top5CategoryWiseSale') IS NOT NULL
+			BEGIN
+				DROP TABLE #Top5CategoryWiseSale
+		END
+
+		SELECT Category,SUM(QUANTITY)QUANTITY,SUM(BillTotal)BillTotal
+		INTO #Top5CategoryWiseSale
+		FROM
+		(
+		SELECT C.[Name] Category,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+		FROM R_SalesTempMaster SM
+		INNER JOIN R_SalesTempDetail SD ON SM.[GuID] = SD.MasterID
+		INNER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+		INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.[GuID]
+		INNER JOIN R_Category C ON PPD.CategoryID = C.[GuID]
+		WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+		AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+		AND SM.BranchID = @BranchID
+		AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+		GROUP BY C.[Name]
+
+		UNION ALL
+
+		SELECT C.[Name] Category,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+		FROM R_SalesMaster SM
+		INNER JOIN R_SalesDetail SD ON SM.[GuID] = SD.MasterID
+		INNER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+		INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.[GuID]
+		INNER JOIN R_Category C ON PPD.CategoryID = C.[GuID]
+		WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+		AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+		AND SM.BranchID = @BranchID
+		AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+		GROUP BY  C.[Name]
+	)
+	AS T
+	GROUP BY Category
+
+	SELECT TOP 5 Category,BillTotal
+	FROM #Top5CategoryWiseSale
+	ORDER BY BillTotal DESC
+GO
+PRINT 'Created or altered SP GetTop5CategoryWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetLeast5CategoryWiseSale]
+(
+ @IsLiveSale     BIT              = NULL,
+ @UserID         VARCHAR(MAX)     = NULL,
+ @FromDate       VARCHAR(MAX)	  = NULL,
+ @ToDate         VARCHAR(MAX)	  = NULL,
+ @BranchID       UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+
+			IF Object_id('TempDB.dbo.#Top5CategoryWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #Top5CategoryWiseSale
+			END
+
+			SELECT Category,SUM(QUANTITY) QUANTITY,SUM(BillTotal)BillTotal
+			INTO #Top5CategoryWiseSale
+			FROM
+			(
+			SELECT C.[Name] Category,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+			FROM R_SalesTempMaster SM
+			INNER JOIN R_SalesTempDetail SD ON SM.[GuID] = SD.MasterID
+			INNER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+			INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.[GuID]
+			INNER JOIN R_Category C ON PPD.CategoryID = C.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY C.[Name]
+
+			UNION ALL
+
+			SELECT C.[Name] Category,SUM(Quantity)QUANTITY ,ROUND(SUM(((SD.unitRate* SD.Quantity)-SD.Discount)+(SD.Tax)+(SD.CessAmount)),2) BillTotal
+			FROM R_SalesMaster SM
+			INNER JOIN R_SalesDetail SD ON SM.[GuID] = SD.MasterID
+			INNER JOIN restaurant.Product PM ON SD.ProductID = PM.[GuID]
+			INNER JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PM.[GuID]
+			INNER JOIN R_Category C ON PPD.CategoryID = C.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND SM.Cancelled=0 and SM.Deleted=0 AND Refund=0 --AND IsComplementary = 0
+			AND SM.BranchID = @BranchID
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			GROUP BY  C.[Name]
+			)
+			AS T
+			GROUP BY Category
+
+
+			SELECT TOP 5 Category,BillTotal
+			FROM #Top5CategoryWiseSale
+			ORDER BY BillTotal ASC
+GO
+PRINT 'Created or altered SP GetLeast5CategoryWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetBranchWiseSale]
+(
+ @IsLiveSale     BIT				  = NULL,
+ @FromDate       VARCHAR(MAX)		  = NULL,
+ @ToDate         VARCHAR(MAX)		  = NULL,
+ @UserGuID         UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+DECLARE @UserID BIGINT = (SELECT [ID] FROM R_User WHERE [GuID] =@UserGuID )
+
+		IF Object_id('TempDB.dbo.#BranchWiseSaleUserID') IS NOT NULL
+			BEGIN
+				DROP TABLE #BranchWiseSaleUserID
+			END
+
+			SELECT ULM.BranchID AS BranchID
+			INTO #BranchWiseSaleUserID
+			FROM R_User U
+			INNER JOIN restaurant.UserLocationMapping ULM ON ULM.UserID = U.[GuID] AND ULM.IsActive = 1
+			INNER JOIN R_Branch B ON B.[GuID] = ULM.BranchID
+			WHERE U.[GuID] = @UserGuID
+
+			IF Object_id('TempDB.dbo.#BranchWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #BranchWiseSale
+			END
+
+			SELECT Branch,SUM(BillTotal)BillTotal,BranchID
+			INTO #BranchWiseSale
+			FROM (
+
+			SELECT B.[Name] Branch,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+DelAmount+ContAmount+OtherAmount) BillTotal,BranchID
+			FROM R_SalesTempMaster SM
+			INNER JOIN R_Branch B ON SM.BranchID = B.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+			UNION ALL
+
+			SELECT B.[Name] Branch,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+DelAmount+ContAmount+OtherAmount) BillTotal,BranchID
+			FROM R_SalesMaster SM
+			INNER JOIN R_Branch B ON SM.BranchID = B.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			) AS T
+			GROUP BY Branch,BranchID
+
+			IF @UserID = 1
+			BEGIN
+				SELECT Branch,BillTotal,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2)) AS [Percentage]
+				FROM #BranchWiseSale
+			END
+			ELSE
+			BEGIN
+				SELECT Branch,BillTotal,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2)) AS [Percentage]
+				FROM #BranchWiseSale
+				WHERE BranchID IN (SELECT BranchID FROM #BranchWiseSaleUserID)
+			END
+GO
+PRINT 'Created or altered SP GetBranchWiseSale.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetBranchWiseSaleTableReport]
+(
+ @IsLiveSale     BIT				  = NULL,
+ @FromDate       VARCHAR(MAX)		  = NULL,
+ @ToDate         VARCHAR(MAX)		  = NULL,
+ @UserGuID         UNIQUEIDENTIFIER	  = NULL
+ )
+AS
+DECLARE @UserID BIGINT = (SELECT [ID] FROM R_User WHERE [GuID] =@UserGuID )
+
+			IF Object_id('TempDB.dbo.#BranchWiseSaleUserID') IS NOT NULL
+			BEGIN
+				DROP TABLE #BranchWiseSaleUserID
+			END
+
+			SELECT ULM.BranchID AS BranchID
+			INTO #BranchWiseSaleUserID
+			FROM R_User U
+			INNER JOIN restaurant.UserLocationMapping ULM ON ULM.UserID = U.[GuID] AND ULM.IsActive = 1
+			INNER JOIN R_Branch B ON B.[GuID] = ULM.BranchID
+			WHERE U.[GuID] = @UserGuID
+
+
+IF Object_id('TempDB.dbo.#BranchWiseSale') IS NOT NULL
+				BEGIN
+					DROP TABLE #BranchWiseSale
+			END
+
+			SELECT TransactionDate,Branch,SUM(BillTotal)BillTotal,SUM([Card])[Card],SUM(Cash)Cash,SUM(Pending)Pending,BranchID
+			INTO #BranchWiseSale
+			FROM(
+			SELECT SM.TransactionDate,B.[Name] Branch,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+DelAmount+ContAmount+OtherAmount) BillTotal
+			,SM.[Card],SM.Cash
+			,CASE WHEN SM.IsPending  = 1 THEN (SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff)
+			ELSE 0 END AS Pending,BranchID
+			FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN R_Branch B ON SM.BranchID = B.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+
+			UNION ALL
+
+			SELECT SM.TransactionDate,B.[Name] Branch,(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff+DelAmount+ContAmount+OtherAmount) BillTotal
+			,SM.[Card],SM.Cash,CASE WHEN SM.IsPending  = 1 THEN (SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff)
+			ELSE 0 END AS Pending,BranchID
+			FROM R_SalesMaster SM
+			LEFT OUTER JOIN R_Branch B ON SM.BranchID = B.[GuID]
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID]
+			WHERE  CAST(TransactionDate AS DATE) BETWEEN COALESCE(@FromDate,TransactionDate) AND COALESCE(@ToDate,TransactionDate)
+			AND Cancelled=0 and SM.Deleted=0 AND Refund=0 AND IsComplementary = 0
+			AND (@IsLiveSale IS NULL OR (@IsLiveSale = 1 AND SM.IsPending = 1) OR (@IsLiveSale = 0 AND SM.IsPending = 0))
+			) AS T
+			GROUP BY TransactionDate,Branch,BranchID
+
+			IF @UserID = 1
+			BEGIN
+				SELECT TransactionDate,Branch,BillTotal,[Card],Cash,Pending,SUM(BillTotal)TotalBillAmount,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+				PERCENTAGE
+				INTO #BranchWiseSaleSystem
+				FROM #BranchWiseSale
+				GROUP BY TransactionDate,Branch,BillTotal,[Card],Cash,Pending
+
+				SELECT TransactionDate,Branch,BillTotal,[Card],Cash,Pending,(SELECT SUM(TotalBillAmount) FROM #BranchWiseSaleSystem)TotalBillAmount
+				,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+				[PERCENTAGE]
+				FROM #BranchWiseSale
+				GROUP BY TransactionDate,Branch,BillTotal,[Card],Cash,Pending
+				ORDER BY TransactionDate
+			END
+			ELSE
+			BEGIN
+				SELECT TransactionDate,Branch,BillTotal,[Card],Cash,Pending,SUM(BillTotal)TotalBillAmount,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+				[PERCENTAGE]
+				INTO #BranchWiseSaleUser
+				FROM #BranchWiseSale
+				WHERE BranchID IN (SELECT BranchID FROM #BranchWiseSaleUserID)
+				GROUP BY TransactionDate,Branch,BillTotal,[Card],Cash,Pending
+				ORDER BY TransactionDate
+
+				SELECT TransactionDate,Branch,BillTotal,[Card],Cash,Pending,(SELECT SUM(TotalBillAmount) FROM #BranchWiseSaleUser)TotalBillAmount
+				,CAST(IIF(BillTotal=0,0,ROUND((BillTotal*100)/SUM(BillTotal) OVER(),2)) AS DECIMAL(18,2))
+				[PERCENTAGE]
+				FROM #BranchWiseSale
+				GROUP BY TransactionDate,Branch,BillTotal,[Card],Cash,Pending
+				ORDER BY TransactionDate
+			END
+GO
+PRINT 'Created or altered SP GetBranchWiseSaleTableReport.';
+GO
+
+-- ============================================================
+-- Phase 1 fix (continued): @StatusType was computed per-row but
+-- silently discarded by a hardcoded final WHERE clause in these
+-- three procs. Restoring it as a real filter, NULL = today's
+-- default (unchanged: RunningOrder+Completed / Not Deleted).
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_SalesReport]
+(
+ @IsDayClosed    INT		  = NULL,
+ @CounterID      VARCHAR(MAX) = NULL,
+ @SectionID      VARCHAR(MAX) = NULL,
+ @UserID         VARCHAR(MAX) = NULL,
+ @PaymentType    VARCHAR(MAX) = NULL,
+ @PaymentCardID  VARCHAR(MAX) = NULL,
+ @FromDate       DATE	  = NULL,
+ @ToDate         DATE	  = NULL,
+ @StatusType     VARCHAR(MAX) = NULL
+
+ --@FinYearID    VARCHAR(MAX) = NULL,
+ --@BranchID     VARCHAR(MAX) = NULL
+ )
+AS
+BEGIN
+---RE DECLARING---
+	DECLARE
+	     @R_IsDayClosed     INT					 = @IsDayClosed,
+		 @R_CounterID       VARCHAR(MAX)		 = @CounterID,
+		 @R_SectionID       VARCHAR(MAX)		 = @SectionID,
+		 @R_UserID          VARCHAR(MAX)		 = @UserID,
+		 @R_PaymentType       VARCHAR(MAX)		 = @PaymentType,
+		 @R_PaymentCardID      VARCHAR(MAX)		 = @PaymentCardID,
+		 @R_FromDate        DATE				 = @FromDate,
+		 @R_ToDate          DATE				 = @ToDate,
+		 @R_StatusType         VARCHAR(MAX)		 = @StatusType,
+         @VatEnabled bit = (Select CASE WHEN Value = 'True' THEN 1 ELSE 0 END AS Value from R_Settings where [Key] = 'IsVATEnabled')
+	DECLARE @Format VARCHAR(50)= (Select Value from R_Settings where [Key] = 'CurrencyFormat')
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+
+	SET NOCOUNT ON
+
+	SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#SalesReport') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReport
+	END
+	------BEGIN OF DETAIL SECTION-----
+	SELECT *
+	INTO #SalesReport
+	FROM
+	(
+	SELECT SM.[No],SM.BillNo BillNo,SM.TransactionDate, SM.BillTime AS BillDate
+	,CASE WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+	      WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+		  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+		  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None'
+		  ELSE 'Cash' END AS PaymentType
+   ,CASE WHEN CardID IS NOT NULL THEN PC.CardName
+		WHEN CardID IS NULL AND Cash=0.00 THEN 'Card'
+		ELSE 'Cash' END AS PaymentCard
+	,SM.RTotal AS RateTotal
+	,CASE WHEN @VatEnabled = 0 THEN 0 ELSE SM.Tax  END AS VatAmount
+	,CASE WHEN @VatEnabled = 1 THEN 0 ELSE SM.Tax END AS TaxAmount
+	,(SM.Discount+ISNULL(SM.ProdDiscount,0)) [Discount]
+	,SM.RoundOff RoundOff
+	,CASE WHEN ComplementaryTotal>0 THEN '0.00'
+	ELSE ((SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff + ISNULL(DelAmount+ContAmount+OtherAmount,0)))END AS NetTotal
+	,SM.Cash AS CashTotal
+	,SM.[Card]AS CardTotal,C.Name [Counter], S.Name Section, B.Name AS Location
+	,U.Name AS Waiter
+	,CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+			WHEN Refund = 1 THEN 'Refund'
+			WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+			WHEN SM.Merged = 1 THEN 'Merged'
+			--WHEN IsComplementary = 1 THEN 'Complementary'
+			WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0 THEN 'Completed'
+			ELSE 'RunningOrder' END AS [Status]
+    ,CancelReason,CardNo,CM.[Name] as Customer
+	,ISNULL(DelAmount+ContAmount+OtherAmount,0) AS OtherCharges
+	FROM R_SalesMaster SM
+		LEFT OUTER JOIN R_Section S on S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C on C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_PaymentCards PC ON SM.CardID = PC.[GuID]
+		LEFT OUTER JOIN R_User U on U.[GuID]= SM.WaiterID
+		LEFT OUTER JOIN R_Customer CM ON CM.[GuID] = SM.CustomerID
+		LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0
+	WHERE (SM.CounterID=@R_CounterID OR @R_CounterID IS NULL)
+		AND (S.[GuID]= @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+		AND (SM.CardID = @R_PaymentCardID OR @R_PaymentCardID IS NULL)
+		AND (SM.TransactionDate>=@R_FromDate OR @R_FromDate IS NULL) and (SM.TransactionDate<@R_ToDate OR @R_ToDate IS NULL)
+
+		UNION ALL
+
+		SELECT SM.[No],SM.BillNo BillNo,SM.TransactionDate, SM.BillTime AS BillDate
+	,CASE WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+	      WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+		  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+		  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None'
+		  ELSE 'Cash' END AS PaymentType
+   ,CASE WHEN CardID IS NOT NULL THEN PC.CardName
+		WHEN CardID IS NULL AND Cash=0.00 THEN 'Card'
+		ELSE 'Cash' END AS PaymentCard
+	,SM.RTotal AS RateTotal
+	,CASE WHEN @VatEnabled = 0 THEN 0 ELSE SM.Tax  END AS VatAmount
+	,CASE WHEN @VatEnabled = 1 THEN 0 ELSE SM.Tax END AS TaxAmount
+	,(SM.Discount+ISNULL(SM.ProdDiscount,0)) [Discount]
+	,SM.RoundOff RoundOff
+	,CASE WHEN ComplementaryTotal>0 THEN '0.00'
+	ELSE ((SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff + ISNULL(DelAmount+ContAmount+OtherAmount,0)))END AS NetTotal
+	,SM.Cash AS CashTotal
+	,SM.[Card]AS CardTotal,C.Name [Counter], S.Name Section, B.Name AS Location
+	,U.Name AS Waiter
+	,CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+			WHEN Refund = 1 THEN 'Refund'
+			WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+			WHEN SM.Merged = 1 THEN 'Merged'
+			--WHEN IsComplementary = 1 THEN 'Complementary'
+			WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0  THEN 'Completed'
+			ELSE 'RunningOrder' END AS [Status]
+    ,CancelReason,CardNo,CM.[Name] as Customer
+	,ISNULL(DelAmount+ContAmount+OtherAmount,0) AS OtherCharges
+	FROM R_SalesTempMaster SM
+		LEFT OUTER JOIN R_Section S on S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C on C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_PaymentCards PC ON SM.CardID = PC.[GuID]
+		LEFT OUTER JOIN R_User U on U.[GuID]= SM.WaiterID
+		LEFT OUTER JOIN R_Customer CM ON CM.[GuID] = SM.CustomerID
+		LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0
+	WHERE (SM.CounterID=@R_CounterID OR @R_CounterID IS NULL)
+	    AND (S.[GuID]= @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+	    AND (SM.CardID = @R_PaymentCardID OR @R_PaymentCardID IS NULL)
+		AND (SM.TransactionDate>=@R_FromDate OR @R_FromDate IS NULL) and (SM.TransactionDate<@R_ToDate OR @R_ToDate IS NULL)
+		) AS SalesDetail
+		WHERE ([Status] = @R_StatusType OR (ISNULL(@R_StatusType,'') = '' AND [Status] in ('RunningOrder','Completed'))) AND (PaymentType= @R_PaymentType OR @R_PaymentType IS NULL)
+
+	SELECT * FROM #SalesReport AS ReportDetail
+	ORDER BY TransactionDate,[No]
+	------END OF DETAIL SECTION-----
+
+	SELECT '' AS [No],'' AS BillNo,'' AS TransactionDate,'' AS BillDate,'Cash' AS PaymentType,'Cash' AS PaymentCard
+	,FORMAT(SUM(RateTotal),@Format)RateTotal
+	,FORMAT(SUM(VatAmount),@Format)VatAmount
+	,FORMAT(SUM(TaxAmount),@Format)TaxAmount
+	,FORMAT(SUM(Discount),@Format)Discount
+	,FORMAT(SUM(RoundOff),@Format)RoundOff
+	,FORMAT(SUM(NetTotal),@Format)NetTotal
+	,FORMAT(SUM(CashTotal),@Format)CashTotal
+	,FORMAT(SUM(CardTotal),@Format)CardTotal
+	,SUM(OtherCharges)OtherCharges
+	,'' AS [Counter],'' AS Section,'' AS [Location],'' AS Waiter,'Completed' AS [Status],'' AS CancelReason,'' AS CardNo,'' AS Customer
+	FROM #SalesReport
+
+	IF Object_id('TempDB.dbo.#SalesReport') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReport
+	END
+
+	SET NOCOUNT OFF
+
+END
+GO
+PRINT 'Created or altered SP Report_SalesReport.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_SalesReportPaging]
+(
+ @IsDayClosed			 INT		  = NULL,
+ @CounterID				 VARCHAR(MAX) = NULL,
+ @SectionID				 VARCHAR(MAX) = NULL,
+ @UserID				 VARCHAR(MAX) = NULL,
+ @PaymentType			 VARCHAR(MAX) = NULL,
+ @PaymentCardID			 VARCHAR(MAX) = NULL,
+ @FromDate				 DATE		  = NULL,
+ @ToDate				 DATE		  = NULL,
+ @StatusType			 VARCHAR(MAX) = NULL,
+ @PageNumber			 INT          = NULL,
+ @PageSize				 INT          = NULL,
+ @SortingColumn			 VARCHAR(MAX) = NULL,
+ @SortingDirection		 VARCHAR(MAX) = NULL,
+ @BranchID				 VARCHAR(MAX) = NULL
+
+ )
+AS
+BEGIN
+---RE DECLARING---
+	DECLARE
+	     @R_IsDayClosed      INT				 = @IsDayClosed,
+		 @R_CounterID        VARCHAR(MAX)		 = @CounterID,
+		 @R_SectionID        VARCHAR(MAX)		 = @SectionID,
+		 @R_UserID           VARCHAR(MAX)		 = @UserID,
+		 @R_PaymentType      VARCHAR(MAX)		 = @PaymentType,
+		 @R_PaymentCardID    VARCHAR(MAX)		 = @PaymentCardID,
+		 @R_FromDate         DATE				 = @FromDate,
+		 @R_ToDate           DATE				 = @ToDate,
+		 @R_StatusType       VARCHAR(MAX)		 = @StatusType,
+         @VatEnabled		 BIT = (Select CASE WHEN Value = 'True' THEN 1 ELSE 0 END AS Value from R_Settings where [Key] = 'IsVATEnabled'),
+		 @R_PageNumber		 INT				 = @PageNumber,
+         @R_PageSize		 INT				 = @PageSize,
+         @R_SortingColumn    VARCHAR(MAX)        = @SortingColumn,
+         @R_SortingDirection VARCHAR(MAX)        = @SortingDirection,
+		 @R_BranchID        VARCHAR(MAX)		 = @BranchID
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+
+	SET NOCOUNT ON
+
+
+	SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#SalesReport') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReport
+	END
+
+	IF Object_id('TempDB.dbo.#SalesReportCount') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReportCount
+	END
+
+	------BEGIN SELECT FOR SALES REPORT-----
+SELECT *
+	INTO #SalesReport
+	FROM
+	(
+		 SELECT SM.[No],SM.BillNo BillNo,SM.TransactionDate, SM.BillTime AS BillDate
+		,CASE WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+			  WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None'
+			  ELSE 'Cash' END AS PaymentType
+	   ,CASE WHEN CardID IS NOT NULL THEN PC.CardName
+			 WHEN [Cash]>0.00 AND [Card]=0.00 AND CustomerCredit = 0 THEN 'Cash'
+			 WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+			 WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			 ELSE 'None' END AS PaymenCardType
+		,SM.RTotal AS RateTotal
+		,CASE WHEN @VatEnabled = 0 THEN 0 ELSE SM.Tax  END AS VatAmount
+		,CASE WHEN @VatEnabled = 1 THEN 0 ELSE SM.Tax END AS TaxAmount
+		,(SM.Discount+ISNULL(SM.ProdDiscount,0)) [Discount]
+		,SM.RoundOff RoundOff
+		,CASE WHEN ComplementaryTotal>0 THEN '0.00'
+		ELSE ((SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff + ISNULL(DelAmount+ContAmount+OtherAmount,0)))END AS NetTotal
+		,SM.Cash AS CashTotal
+		,SM.[Card]AS CardTotal,C.Name [Counter], S.Name Section, B.Name AS Branch
+		,U.Name AS [User]
+		,CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+				WHEN Refund = 1 THEN 'Refund'
+				WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+				WHEN SM.Merged = 1 THEN 'Merged'
+				--WHEN IsComplementary = 1 THEN 'Complementary'
+				WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0 THEN 'Completed'
+				ELSE 'RunningOrder' END AS [SalesStatus]
+		,CancelReason AS Reason,CardNo,CM.[Name] as Customer
+		,ISNULL(DelAmount+ContAmount+OtherAmount,0) AS OtherCharges
+		FROM R_SalesMaster SM
+			LEFT OUTER JOIN restaurant.Section S on S.[GuID] = SM.SectionID
+			LEFT OUTER JOIN R_Counter C on C.[GuID] = SM.CounterID
+			LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+			LEFT OUTER JOIN R_PaymentCards PC ON SM.CardID = PC.[GuID]
+			LEFT OUTER JOIN R_User U on U.[GuID]= SM.WaiterID
+			LEFT OUTER JOIN R_Customer CM ON CM.[GuID] = SM.CustomerID
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0
+		WHERE (SM.CounterID=@R_CounterID OR @R_CounterID IS NULL)
+			AND (S.[GuID]= @R_SectionID OR @R_SectionID IS NULL)
+			AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+			AND (SM.CardID = @R_PaymentCardID OR @R_PaymentCardID IS NULL)
+			AND (SM.TransactionDate>=@R_FromDate OR @R_FromDate IS NULL) and (SM.TransactionDate<@R_ToDate OR @R_ToDate IS NULL)
+			AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+
+			UNION ALL
+
+		SELECT SM.[No],SM.BillNo BillNo,SM.TransactionDate, SM.BillTime AS BillDate
+		,CASE WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+			  WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None'
+			  ELSE 'Cash' END AS PaymentType
+	   ,CASE WHEN CardID IS NOT NULL THEN PC.CardName
+			WHEN CardID IS NULL AND Cash=0.00 THEN 'Card'
+			ELSE 'Cash' END AS PaymenCardType
+		,SM.RTotal AS RateTotal
+		,CASE WHEN @VatEnabled = 0 THEN 0 ELSE SM.Tax  END AS VatAmount
+		,CASE WHEN @VatEnabled = 1 THEN 0 ELSE SM.Tax END AS TaxAmount
+		,(SM.Discount+ISNULL(SM.ProdDiscount,0)) [Discount]
+		,SM.RoundOff RoundOff
+		,CASE WHEN ComplementaryTotal>0 THEN '0.00'
+		ELSE ((SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff + ISNULL(DelAmount+ContAmount+OtherAmount,0)))END AS NetTotal
+		,SM.Cash AS CashTotal
+		,SM.[Card]AS CardTotal,C.Name [Counter], S.Name Section, B.Name AS Branch
+		,U.Name AS [User]
+		,CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+				WHEN Refund = 1 THEN 'Refund'
+				WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+				WHEN SM.Merged = 1 THEN 'Merged'
+				--WHEN IsComplementary = 1 THEN 'Complementary'
+				WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0 THEN 'Completed'
+				ELSE 'RunningOrder' END AS [SalesStatus]
+		,CancelReason AS Reason,CardNo,CM.[Name] as Customer
+		,ISNULL(DelAmount+ContAmount+OtherAmount,0) AS OtherCharges
+		FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN restaurant.Section S on S.[GuID] = SM.SectionID
+			LEFT OUTER JOIN R_Counter C on C.[GuID] = SM.CounterID
+			LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+			LEFT OUTER JOIN R_PaymentCards PC ON SM.CardID = PC.[GuID]
+			LEFT OUTER JOIN R_User U on U.[GuID]= SM.WaiterID
+			LEFT OUTER JOIN R_Customer CM ON CM.[GuID] = SM.CustomerID
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0
+		WHERE (SM.CounterID=@R_CounterID OR @R_CounterID IS NULL)
+			AND (S.[GuID]= @R_SectionID OR @R_SectionID IS NULL)
+			AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+			AND (SM.CardID = @R_PaymentCardID OR @R_PaymentCardID IS NULL)
+			AND (SM.TransactionDate>=@R_FromDate OR @R_FromDate IS NULL) and (SM.TransactionDate<@R_ToDate OR @R_ToDate IS NULL)
+			AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+
+		) AS SalesDetail
+		WHERE ([SalesStatus] = @R_StatusType OR (ISNULL(@R_StatusType,'') = '' AND [SalesStatus] in ('RunningOrder','Completed'))) AND (PaymentType= @R_PaymentType OR @R_PaymentType IS NULL)
+
+	SELECT COUNT(*) AS SalesCount
+		INTO #SalesReportCount
+		FROM #SalesReport
+
+	IF @PageSize = -1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCount)[RowCount]
+					FROM #SalesReport
+					ORDER BY TransactionDate '+ @R_SortingDirection+',Section '+ @R_SortingDirection+',[No] '+ @R_SortingDirection+''
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCount)[RowCount] ,[No] AS [No1], TransactionDate AS TransactionDate1,Section AS Section1
+					FROM #SalesReport
+					ORDER BY  ' + @R_SortingColumn +' '+ @R_SortingDirection+',TransactionDate1 asc,Section1 asc,[No1] asc'
+				EXEC (@SortingCmd)
+			END
+		END
+
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCount)[RowCount]
+					FROM #SalesReport
+					ORDER BY TransactionDate '+ @R_SortingDirection+',Section '+ @R_SortingDirection+',[No] '+ @R_SortingDirection+'
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCount)[RowCount] ,[No] AS [No1], TransactionDate AS TransactionDate1,Section AS Section1
+					FROM #SalesReport
+					ORDER BY  ' + @R_SortingColumn +' '+ @R_SortingDirection+',TransactionDate1 asc,Section1 asc,[No1] asc
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+		END
+		END
+
+		------ FOR GETTING FOOTER TOTAL---------------------
+		SELECT '' AS [No],'' AS BillNo,'' AS TransactionDate,'' AS BillDate,'Cash' AS PaymentType,'Cash' AS PaymenCardType
+		,SUM(RateTotal)RateTotal,SUM(VatAmount)VatAmount,SUM(TaxAmount)TaxAmount,SUM(Discount)Discount
+		,SUM(RoundOff)RoundOff,SUM(NetTotal)NetTotal,SUM(CashTotal)CashTotal,SUM(CardTotal)CardTotal
+		,'' AS [Counter],'' AS Section,'' AS [Branch],'' AS [User],'Completed' AS [SalesStatus],'' AS Reason,'' AS CardNo,'' AS Customer
+		,SUM(OtherCharges)OtherCharges
+		FROM #SalesReport
+
+	------END OF DETAIL SECTION-----
+
+	IF Object_id('TempDB.dbo.#SalesReport') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReport
+	END
+
+	IF Object_id('TempDB.dbo.#SalesReportCount') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReportCount
+	END
+
+	SET NOCOUNT OFF
+
+	END
+GO
+PRINT 'Created or altered SP Report_SalesReportPaging.';
+GO
+
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_SalesReportConsolPaging]
+(
+ @IsDayClosed			 INT		  = NULL,
+ @CounterID				 VARCHAR(MAX) = NULL,
+ @SectionID				 VARCHAR(MAX) = NULL,
+ @UserID				 VARCHAR(MAX) = NULL,
+ @PaymentType			 VARCHAR(MAX) = NULL,
+ @PaymentCardID			 VARCHAR(MAX) = NULL,
+ @FromDate				 DATE		  = NULL,
+ @ToDate				 DATE		  = NULL,
+ @StatusType			 VARCHAR(MAX) = NULL,
+ @PageNumber			 INT          = NULL,
+ @PageSize				 INT          = NULL,
+ @SortingColumn			 VARCHAR(MAX) = NULL,
+ @SortingDirection		 VARCHAR(MAX) = NULL,
+ @BranchID				 VARCHAR(MAX) = NULL
+
+ )
+AS
+BEGIN
+---RE DECLARING---
+	DECLARE
+	     @R_IsDayClosed      INT				 = @IsDayClosed,
+		 @R_CounterID        VARCHAR(MAX)		 = @CounterID,
+		 @R_SectionID        VARCHAR(MAX)		 = @SectionID,
+		 @R_UserID           VARCHAR(MAX)		 = @UserID,
+		 @R_PaymentType      VARCHAR(MAX)		 = @PaymentType,
+		 @R_PaymentCardID    VARCHAR(MAX)		 = @PaymentCardID,
+		 @R_FromDate         DATE				 = @FromDate,
+		 @R_ToDate           DATE				 = @ToDate,
+		 @R_StatusType       VARCHAR(MAX)		 = @StatusType,
+         @VatEnabled		 BIT = (Select CASE WHEN Value = 'True' THEN 1 ELSE 0 END AS Value from R_Settings where [Key] = 'IsVATEnabled'),
+		 @R_PageNumber		 INT				 = @PageNumber,
+         @R_PageSize		 INT				 = @PageSize,
+         @R_SortingColumn    VARCHAR(MAX)        = @SortingColumn,
+         @R_SortingDirection VARCHAR(MAX)        = @SortingDirection,
+		 @R_BranchID        VARCHAR(MAX)		 = @BranchID
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+
+	SET NOCOUNT ON
+
+		 SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+
+	IF Object_id('TempDB.dbo.#SalesReportCons') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReportCons
+	END
+
+	IF Object_id('TempDB.dbo.#SalesReportCountCons') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReportCountCons
+	END
+
+	------BEGIN SELECT FOR SALES REPORT-----
+SELECT *
+	INTO #SalesReportCons
+	FROM
+	(
+		SELECT      restaurant.Section.Name AS SectionName, dbo.R_Branch.Name AS BranchName, SM.TransactionDate AS TransactionDate,
+				SUM(SM.Total) AS Total, SUM(SM.RTotal) AS R_Total, Sum(SM.Tax) AS TaxAmount, SUM(SM.Cash) AS CashTotal, SUM(SM.Card) as CardTotal,
+				SUM(SM.CustomerCredit) as Credit, SUM(SM.Discount) as Discount,
+								 SM.Refund, SM.Cancelled, SUM(ISNULL(DelAmount+ContAmount+OtherAmount,0)) as Extra,
+								 SUM(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff + ISNULL(DelAmount+ContAmount+OtherAmount,0)) as NETTOTAL,
+			  CASE WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+			  WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None'
+			  ELSE 'Cash' END AS PaymentType,
+			  CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+				WHEN Refund = 1 THEN 'Refund'
+				WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+				WHEN SM.Merged = 1 THEN 'Merged'
+				--WHEN IsComplementary = 1 THEN 'Complementary'
+				WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0 THEN 'Completed'
+				ELSE 'RunningOrder' END AS [SalesStatus]
+
+		FROM            dbo.R_Branch INNER JOIN
+								 dbo.R_SalesTempMaster AS SM ON dbo.R_Branch.GuID = SM.BranchID LEFT OUTER JOIN
+								 [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0 INNER JOIN
+								  restaurant.Section ON SM.SectionID =  restaurant.Section.GuID
+			WHERE (SM.TransactionDate>=@R_FromDate) and (SM.TransactionDate<@R_ToDate)
+		GROUP BY  restaurant.Section.Name, dbo.R_Branch.Name, SM.TransactionDate, SM.Refund, SM.Cancelled,
+		SM.IsPending, ComplementaryTotal, CustomerCredit, Card, Cash, SM.Deleted, SM.Merged
+			UNION ALL
+
+		SELECT      restaurant.Section.Name AS SectionName, dbo.R_Branch.Name AS BranchName, SM.TransactionDate AS TransactionDate,
+				SUM(SM.Total) AS Total, SUM(SM.RTotal) AS R_Total, Sum(SM.Tax) AS TaxAmount, SUM(SM.Cash) AS CashTotal, SUM(SM.Card) as CardTotal,
+				SUM(SM.CustomerCredit) as Credit, SUM(SM.Discount) as Discount,
+									SM.Refund, SM.Cancelled, SUM(ISNULL(DelAmount+ContAmount+OtherAmount,0)) as Extra,
+									SUM(SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff + ISNULL(DelAmount+ContAmount+OtherAmount,0)) as NETTOTAL,
+			  CASE WHEN [Card]>0.00 AND [Cash]=0.00 AND CustomerCredit = 0 THEN 'Card'
+			  WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None'
+			  ELSE 'Cash' END AS PaymentType,
+			  CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+				WHEN Refund = 1 THEN 'Refund'
+				WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+				WHEN SM.Merged = 1 THEN 'Merged'
+				--WHEN IsComplementary = 1 THEN 'Complementary'
+				WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0 THEN 'Completed'
+				ELSE 'RunningOrder' END AS [SalesStatus]
+		FROM            dbo.R_Branch INNER JOIN
+									dbo.R_SalesMaster AS SM ON dbo.R_Branch.GuID = SM.BranchID LEFT OUTER JOIN
+									[dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0 INNER JOIN
+									 restaurant.Section ON SM.SectionID =  restaurant.Section.GuID
+		WHERE (SM.TransactionDate>=@R_FromDate) and (SM.TransactionDate<@R_ToDate)
+		GROUP BY  restaurant.Section.Name, dbo.R_Branch.Name, SM.TransactionDate, SM.Refund, SM.Cancelled,
+		SM.IsPending, ComplementaryTotal, CustomerCredit, Card, Cash, SM.Deleted, SM.Merged
+			) AS SalesDetail
+			WHERE ([SalesStatus] = @R_StatusType OR (ISNULL(@R_StatusType,'') = '' AND [SalesStatus] NOT IN ('Deleted')))
+
+
+
+	SELECT COUNT(*) AS SalesCount
+		INTO #SalesReportCountCons
+		FROM #SalesReportCons
+
+	IF @PageSize = -1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCountCons)[RowCount]
+					FROM #SalesReportCons
+					ORDER BY TransactionDate '+ @R_SortingDirection+',SectionName '+ @R_SortingDirection+',[BranchName] '+ @R_SortingDirection+''
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCountCons)[RowCount] ,[BranchName] AS [BranchName1], TransactionDate AS TransactionDate1,SectionName AS Section1
+					FROM #SalesReportCons
+					ORDER BY  ' + @R_SortingColumn +' '+ @R_SortingDirection+',TransactionDate1 asc,Section1 asc,[BranchName] asc'
+				EXEC (@SortingCmd)
+			END
+		END
+
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCountCons)[RowCount]
+					FROM #SalesReportCons
+					ORDER BY TransactionDate '+ @R_SortingDirection+',SectionName '+ @R_SortingDirection+',[BranchName] '+ @R_SortingDirection+'
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesCount FROM #SalesReportCountCons)[RowCount] ,[BranchName] AS [BranchName1], TransactionDate AS TransactionDate1,SectionName AS Section1
+					FROM #SalesReportCons
+					ORDER BY  ' + @R_SortingColumn +' '+ @R_SortingDirection+',TransactionDate1 asc,Section1 asc,[BranchName1] asc
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+		END
+		END
+
+		------ FOR GETTING FOOTER TOTAL---------------------
+		SELECT SUM(NETTOTAL) AS GrandTotal
+		,'' AS Section,'' AS [Branch] FROM #SalesReportCons
+
+	------END OF DETAIL SECTION-----
+
+	IF Object_id('TempDB.dbo.#SalesReportCons') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReportCons
+	END
+
+	IF Object_id('TempDB.dbo.#SalesReportCountCons') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesReportCountCons
+	END
+
+	SET NOCOUNT OFF
+
+	END
+GO
+PRINT 'Created or altered SP Report_SalesReportConsolPaging.';
+GO
+
 
 -- ============================================================
 -- SECTION G: DROP OBSOLETE/UNUSED OBJECTS
@@ -9326,7 +10820,7 @@ AS
 	TabID,Merged,Pax,ISNULL(Redeem,0)Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
 	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
 	convert(BIGINT,Version)[Version],UpdatedUser
-	,SD.[GuID] AS DeliveryID
+	,SD.[GuID] AS DeliveryID, OrderOpenedDateTime, OrderClosedDateTime
 	FROM [R_SalesTempMaster] SM
 	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
 	WHERE SM.[GuID] IN (SELECT GuID FROM @ChangedMasterIDs)
@@ -10083,6 +11577,71 @@ PRINT 'Section Y complete.';
 GO
 
 -- ============================================================
+-- Section Y2 - Fix Consumption Report menu entry + permissions (Kashkan)
+-- ============================================================
+-- Section Y above registered the row (GuID 7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02)
+-- as "Menu Item Consumption Report" but never inserted any
+-- restaurant.UserWebMenuPermission rows for it -- so despite existing in
+-- restaurant.WebMenu (sibling of Sales Item Summary / Wastage Summary under
+-- POS SUMMARY, ParentID=7, IsSubMenu=1) it was invisible to every role,
+-- since fetchmenuPermissions/fetchspecialpermission filter the tree per role
+-- before rendering. Also correcting the name/URL to the confirmed route.
+PRINT 'Section Y2: Fixing Consumption Report menu entry + permissions...';
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    UPDATE restaurant.WebMenu
+    SET Name = 'Consumption Report', Url = '/Reports/ConsumptionReport/Index'
+    WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02'
+      AND (Name <> 'Consumption Report' OR Url <> '/Reports/ConsumptionReport/Index');
+
+    IF @@ROWCOUNT > 0
+        PRINT 'Renamed Menu Item Consumption Report -> Consumption Report.';
+    ELSE
+        PRINT 'Consumption Report menu entry already correctly named (or not found).';
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[UserWebMenuPermission]') AND type = 'U')
+BEGIN
+    DECLARE @ConsumptionMenuID INT = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02');
+    DECLARE @SalesItemSummaryID INT = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name = 'Sales Item Summary');
+
+    IF @ConsumptionMenuID IS NOT NULL AND @SalesItemSummaryID IS NOT NULL
+    BEGIN
+        -- Update any pre-existing rows for this (broken/invisible) menu item so
+        -- they actually match Sales Item Summary, not just fill in gaps -- a
+        -- stray all-zero placeholder row was found for UserTypeID=1 on at least
+        -- one database, which would otherwise leave that role incorrectly
+        -- denied despite having full access to the sibling report.
+        UPDATE existing
+        SET existing.[View] = src.[View], existing.[Add] = src.[Add], existing.[Edit] = src.[Edit], existing.Deletion = src.Deletion
+        FROM restaurant.UserWebMenuPermission existing
+        JOIN restaurant.UserWebMenuPermission src ON src.MenuID = @SalesItemSummaryID AND src.UserTypeID = existing.UserTypeID
+        WHERE existing.MenuID = @ConsumptionMenuID;
+
+        INSERT INTO restaurant.UserWebMenuPermission (GuID, UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+        SELECT NEWID(), src.UserTypeID, @ConsumptionMenuID, src.[View], src.[Add], src.[Edit], src.Deletion
+        FROM restaurant.UserWebMenuPermission src
+        WHERE src.MenuID = @SalesItemSummaryID
+          AND NOT EXISTS (
+                SELECT 1 FROM restaurant.UserWebMenuPermission existing
+                WHERE existing.MenuID = @ConsumptionMenuID AND existing.UserTypeID = src.UserTypeID
+          );
+
+        PRINT 'Inserted ' + CAST(@@ROWCOUNT AS VARCHAR(10)) + ' new permission row(s) for Consumption Report (existing rows for matching roles were also synced to Sales Item Summary).';
+    END
+    ELSE
+        PRINT 'Skipped Consumption Report permission copy (menu row or Sales Item Summary not found).';
+END
+GO
+
+PRINT 'Section Y2 complete.';
+GO
+
+-- ============================================================
 -- Section Z - Generic backfill of missing WebMenu entries from defaultDB (2026-08-08)
 -- ============================================================
 -- Generic, additive "diff and backfill" for restaurant.WebMenu, so future menu
@@ -10149,4 +11708,1909 @@ END
 GO
 
 PRINT 'Section Z complete.';
+GO
+
+-- ============================================================
+-- Section AA - Kashkan fix: ComplimentaryReason missing from sync
+-- pipeline (Web/cloud DB never received it after upload, even
+-- though it saved fine locally). CancelReason already flowed
+-- through every hop of this pipeline; ComplimentaryReason never
+-- did. Fixes: restaurant.Sale table type, the local source procs
+-- (Sync_Sales_GetAll, Sync_SalesTemp_GetAll), and the cloud-side
+-- consumers (Sync_Sales_Insert, Sync_SalesTemp_Insert). Also
+-- recreates sale_temp_insert unchanged, since it references the
+-- same UDT and must be dropped/recreated alongside it.
+--
+-- Addendum (Kashkan Phase 5, Order Timing): reused this same
+-- drop-UDT-recreate-UDT-recreate-procs cycle to also add
+-- OrderOpenedDateTime/OrderClosedDateTime to restaurant.Sale, and to
+-- Sync_Sales_GetAll/Sync_SalesTemp_GetAll (SELECT) and
+-- Sync_Sales_Insert/Sync_SalesTemp_Insert (MERGE UPDATE/INSERT), so
+-- these two new columns flow through the local-to-cloud sync pipeline
+-- the same way ComplimentaryReason does. sale_temp_insert still did
+-- not need any body changes (same reasoning as above - it's dropped
+-- and recreated verbatim only because it also references the UDT).
+-- ============================================================
+-- ============================================================
+-- Kashkan feedback fix: Complimentary Reason not present in Web/cloud DB
+-- after sync upload. Root cause: ComplimentaryReason was never added to
+-- the restaurant.Sale table type (the TVP the WinForms sync pipeline
+-- uses to upload sales), the local Sync_Sales_GetAll source proc, the
+-- Sale domain model, or the cloud-side Sync_Sales_Insert/Sync_SalesTemp_Insert
+-- procs that consume the TVP. Every one of these already carries
+-- CancelReason (which is why Cancel sync works) but was never extended
+-- to ComplimentaryReason when that feature was added.
+-- ============================================================
+PRINT 'Kashkan fix: extending sync pipeline for ComplimentaryReason...';
+GO
+
+-- ---- Step 1: drop procs that reference restaurant.Sale as a TVP param,
+-- required before the type itself can be dropped/recreated.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[Sync_Sales_Insert]') AND type = 'P')
+    DROP PROCEDURE [restaurant].[Sync_Sales_Insert];
+GO
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[Sync_SalesTemp_Insert]') AND type = 'P')
+    DROP PROCEDURE [restaurant].[Sync_SalesTemp_Insert];
+GO
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[sale_temp_insert]') AND type = 'P')
+    DROP PROCEDURE [restaurant].[sale_temp_insert];
+GO
+
+-- ---- Step 2: recreate restaurant.Sale UDT with the new column added
+-- (right after CancelReason, matching the R_SalesMaster column placement).
+IF EXISTS (SELECT 1 FROM sys.table_types WHERE name = 'Sale' AND schema_id = SCHEMA_ID('restaurant'))
+    DROP TYPE [restaurant].[Sale];
+GO
+
+IF SCHEMA_ID('restaurant') IS NOT NULL
+BEGIN
+    EXEC('CREATE TYPE [restaurant].[Sale] AS TABLE (
+      [GuID] uniqueidentifier NOT NULL,
+      [No] int NOT NULL,
+      [Date] datetime NOT NULL,
+      [SectionID] uniqueidentifier NOT NULL,
+      [CounterID] uniqueidentifier NOT NULL,
+      [BillTime] datetime NOT NULL,
+      [CustomerID] uniqueidentifier NULL,
+      [Total] decimal(18,8) NOT NULL,
+      [RTotal] decimal(18,8) NOT NULL,
+      [Tax] decimal(18,8) NOT NULL,
+      [Cash] decimal(18,8) NULL,
+      [Card] decimal(18,8) NULL,
+      [CardNo] varchar(50) NULL,
+      [FxPaid] decimal(18,8) NULL,
+      [FxTypeID] uniqueidentifier NULL,
+      [FxRate] decimal(18,2) NULL,
+      [FxAmount] decimal(18,8) NULL,
+      [CustomerCredit] decimal(18,8) NOT NULL,
+      [Discount] decimal(18,2) NULL,
+      [DiscountPercentage] decimal(18,2) NULL,
+      [RoundOff] decimal(18,8) NULL,
+      [FinancialYearID] int NOT NULL,
+      [UserID] int NOT NULL,
+      [CreatedBy] uniqueidentifier NOT NULL,
+      [Remarks] varchar(250) NULL,
+      [CompanyID] int NOT NULL,
+      [LastUpdate] datetime NOT NULL,
+      [BranchID] uniqueidentifier NULL,
+      [Deleted] bit NULL,
+      [Refund] bit NULL,
+      [TransactionDate] datetime NULL,
+      [Cancelled] bit NULL,
+      [WaiterID] uniqueidentifier NULL,
+      [IsPending] bit NULL,
+      [ProdDiscount] decimal(18,8) NULL,
+      [CustomerGSTNo] varchar(50) NULL,
+      [BillNo] varchar(50) NULL,
+      [SeriesType] int NULL,
+      [TableID] uniqueidentifier NULL,
+      [CancelReason] varchar(250) NULL,
+      [ComplimentaryReason] varchar(250) NULL,
+      [TokenNo] int NULL,
+      [IsDespatched] bit NULL,
+      [IsSettled] bit NULL,
+      [DeliveryDate] datetime NULL,
+      [DeliveryTime] datetime NULL,
+      [DeliveryRemarks] varchar(50) NULL,
+      [IsShiftClosed] bit NULL,
+      [Merged] bit NULL,
+      [TabBillNo] varchar(50) NULL,
+      [ChairPositions] varchar(50) NULL,
+      [NoOfChairs] int NULL,
+      [RedeemPoints] int NULL,
+      [Redeem] decimal(18,2) NULL,
+      [TabID] varchar(100) NULL,
+      [Pax] int NULL,
+      [ShiftNumber] int NULL,
+      [CardID] varchar(100) NULL,
+      [CessAmount] decimal(18,2) NOT NULL,
+      [IsComplementary] bit NULL,
+      [ComplementaryTotal] decimal(18,8) NULL,
+      [IsprintedFromPay] bit NULL,
+      [WaiterRemarks] nvarchar(100) NULL,
+      [IsSaved] bit NOT NULL,
+      [IsTakenForUpload] bit NULL,
+      [EditedAfterUpload] bit NULL,
+      [VehicleNo] varchar(100) NULL,
+      [UpdatedUser] uniqueidentifier NULL,
+      [OrderType] varchar(20) NULL,
+      [OrderOpenedDateTime] datetime NULL,
+      [OrderClosedDateTime] datetime NULL
+    )');
+    PRINT 'Recreated restaurant.Sale table type with ComplimentaryReason column.';
+END
+GO
+
+PRINT 'Step 2 complete.';
+GO
+CREATE PROCEDURE [restaurant].[Sync_Sales_Insert]
+
+	@sale Restaurant.Sale READONLY,
+	@saleDetail Restaurant.SaleDetail READONLY,
+	@saleComboDetail Restaurant.SaleComboDetail READONLY,
+	@saleDelivery Restaurant.SaleDelivery READONLY,
+	--@saleDeliveryDetail Restaurant.SaleDeliveryDetail READONLY,
+	@saleProductModifierDetail Restaurant.SaleProductModifierDetail READONLY,
+	@salePaymentDetail Restaurant.SalePaymentDetail READONLY,
+	@miscellaneousSalesAmount Restaurant.MiscellaneousSalesAmount READONLY
+AS
+
+ BEGIN TRY
+    BEGIN TRANSACTION
+
+    MERGE dbo.[R_SalesMaster] AS trg
+    USING @sale AS s
+      ON s.[Guid] = trg.Guid AND s.BranchID = trg.BranchID
+     WHEN MATCHED THEN
+       update  set
+	   [GuID] = s.[GuID],
+       [No] = s.[No],
+       [Date] = s.[Date],
+       SectionID = s.SectionID,
+       CounterID = s.CounterID,
+       BillTime =s.BillTime,
+       CustomerID = s.CustomerID,
+       Total = s.Total,
+       RTotal = s.RTotal,
+       Tax = s.Tax,
+       Cash = s.Cash,
+       [Card] = s.[Card],
+       CardNo = s.CardNo,
+       FxPaid = s.FxPaid,
+       FxTypeID = s.FxTypeID,
+       FxRate = s.FxRate,
+       FxAmount = s.FxAmount,
+       CustomerCredit = s.CustomerCredit,
+       Discount = s.Discount,
+	   DiscountPercentage = s.DiscountPercentage,
+	   RoundOff = s.RoundOff,
+       FinancialYearID = s.FinancialYearID,
+       UserID = s.UserID,
+       CreatedBy = s.CreatedBy,
+       Remarks = s.Remarks,
+       CompanyID = s.CompanyID,
+       BranchID = s.BranchID,
+       Deleted = s.Deleted,
+       Refund = s.Refund,
+       TransactionDate = s.TransactionDate,
+       Cancelled = s.Cancelled,
+       WaiterID = s.WaiterID,
+       IsPending = s.IsPending,
+       ProdDiscount = s.ProdDiscount,
+       CustomerGSTNo = s.CustomerGSTNo,
+       BillNo = s.BillNo,
+       SeriesType = s.SeriesType,
+       TableID =s. TableID,
+       TokenNo = s.TokenNo,
+       IsDespatched = s.IsDespatched,
+       IsSettled = s.IsSettled,
+       DeliveryDate = s.DeliveryDate,
+       DeliveryTime = s.DeliveryTime,
+       DeliveryRemarks =s. DeliveryRemarks,
+       IsShiftClosed = s.IsShiftClosed,
+       TabBillNo = s.TabBillNo,
+       ChairPositions = s.ChairPositions,
+       NoOfChairs = s.NoOfChairs,
+       RedeemPoints =s. RedeemPoints,
+       Redeem = s.Redeem,
+       TabID = s.TabID,
+       Pax = s.Pax,
+       ShiftNumber = s.ShiftNumber,
+       CardID = s.CardID,
+       CessAmount = s.CessAmount,
+       IsComplementary = s.IsComplementary,
+       ComplementaryTotal = s.ComplementaryTotal,
+       WaiterRemarks = s.WaiterRemarks,
+       IsSaved = s.IsSaved,
+       IsTakenForUpload = s.IsTakenForUpload,
+       EditedAfterUpload = s.EditedAfterUpload,
+	   VehicleNo = s.VehicleNo,
+	   Merged = s.Merged,
+	   LastUpdate = s.LastUpdate,
+	   CancelReason = s.CancelReason,
+	   ComplimentaryReason = s.ComplimentaryReason,
+	   IsPrintedFromPay = s.IsPrintedFromPay,
+	   UpdatedUser = s.UpdatedUser,
+		OrderType= s.OrderType,
+		OrderOpenedDateTime = s.OrderOpenedDateTime,
+		OrderClosedDateTime = s.OrderClosedDateTime
+     WHEN NOT MATCHED BY TARGET THEN
+      INSERT
+	(
+			[GuID],
+            [No]
+           ,[Date]
+           ,[SectionID]
+           ,[CounterID]
+           ,[BillTime]
+           ,[CustomerID]
+           ,[Total]
+           ,[RTotal]
+           ,[Tax]
+           ,[Cash]
+           ,[Card]
+           ,[CardNo]
+           ,[FxPaid]
+           ,[FxTypeID]
+           ,[FxRate]
+           ,[FxAmount]
+           ,[CustomerCredit]
+           ,[Discount]
+           ,[DiscountPercentage]
+           ,[RoundOff]
+           ,[FinancialYearID]
+           ,[UserID]
+           ,[CreatedBy]
+           ,[Remarks]
+           ,[CompanyID]
+           ,[BranchID]
+           ,[Deleted]
+           ,[Refund]
+           ,[TransactionDate]
+           ,[Cancelled]
+           ,[WaiterID]
+           ,[IsPending]
+           ,[ProdDiscount]
+           ,[CustomerGSTNo]
+           ,[BillNo]
+           ,[SeriesType]
+           ,[TableID]
+           ,[TokenNo]
+           ,[IsDespatched]
+           ,[IsSettled]
+           ,[DeliveryDate]
+           ,[DeliveryTime]
+           ,[DeliveryRemarks]
+           ,[IsShiftClosed]
+           ,[TabBillNo]
+           ,[ChairPositions]
+           ,[NoOfChairs]
+           ,[RedeemPoints]
+           ,[Redeem]
+           ,[TabID]
+           ,[Pax]
+           ,[ShiftNumber]
+           ,[CardID]
+           ,[CessAmount]
+           ,[IsComplementary]
+           ,[ComplementaryTotal]
+           ,[WaiterRemarks]
+           ,[IsSaved]
+           ,[IsTakenForUpload]
+           ,[EditedAfterUpload]
+		   ,[VehicleNo]
+		   ,Merged
+		   ,LastUpdate
+		   ,CancelReason
+		   ,ComplimentaryReason
+		   ,IsPrintedFromPay
+		   ,UpdatedUser,
+		   OrderType,OrderOpenedDateTime,OrderClosedDateTime)
+     values
+	     ( [GuID],
+          [No],
+          [Date],
+          SectionID,
+          CounterID,
+          BillTime,
+          CustomerID,
+          Total,
+          RTotal,
+          Tax,
+          Cash,
+          [Card],
+          CardNo,
+          FxPaid,
+          FxTypeID,
+          FxRate,
+          FxAmount,
+          CustomerCredit,
+          Discount,
+          DiscountPercentage,
+          RoundOff,
+          FinancialYearID,
+          UserID,
+          CreatedBy,
+          Remarks,
+          CompanyID,
+          BranchID,
+          Deleted,
+          Refund,
+          TransactionDate,
+          Cancelled,
+          WaiterID,
+          IsPending,
+          ProdDiscount,
+          CustomerGSTNo,
+          BillNo,
+          SeriesType,
+          TableID,
+          TokenNo,
+          IsDespatched,
+          IsSettled,
+          DeliveryDate,
+          DeliveryTime,
+          DeliveryRemarks,
+          IsShiftClosed,
+          TabBillNo,
+          ChairPositions,
+          NoOfChairs,
+          RedeemPoints,
+          Redeem,
+          TabID,
+          Pax,
+          ShiftNumber,
+          CardID,
+          CessAmount,
+          IsComplementary,
+          ComplementaryTotal,
+          WaiterRemarks,
+          IsSaved,
+          IsTakenForUpload,
+          EditedAfterUpload,
+		  VehicleNo,
+		  Merged
+		  ,LastUpdate
+		  ,CancelReason
+		  ,ComplimentaryReason
+		  ,IsPrintedFromPay
+		  ,UpdatedUser,
+		  OrderType,OrderOpenedDateTime,OrderClosedDateTime) ;
+
+
+	-------------------SalesDetailInsertion--------------------------------------------------
+
+
+	DELETE R_SalesDetail WHERE MasterID in (select MasterID from @saleDetail)
+
+	INSERT INTO [dbo].[R_SalesDetail]
+           (
+		   [GuID],
+           [MasterID]
+           ,[ProductID]
+           ,[Quantity]
+           ,[BaseQuantity]
+           ,[UnitRate]
+           ,[TaxID]
+           ,[TaxPercentage]
+           ,[Tax]
+           ,[DiscPercentage]
+           ,[Discount]
+           ,[UnitID]
+           ,[ItemTypeID]
+           ,[Deleted]
+           ,[IsTaxIncludedInPrice]
+           ,[Cancelled]
+           --,[IsStockUpdated]
+           ,[Remarks]
+           --,[R_ProductUpdated]
+           ,[Merged]
+           ,[CessAmount], CourseNo, ChairNo)
+
+          select
+		  [GuID],
+           MasterID,
+           ProductID,
+           Quantity,
+           BaseQuantity,
+           UnitRate,
+           TaxID,
+           TaxPercentage,
+           Tax,
+           DiscPercentage,
+           Discount,
+           UnitID,
+           ItemTypeID,
+           Deleted,
+           IsTaxIncludedInPrice,
+           Cancelled,
+          -- IsStockUpdated,
+           Remarks,
+          -- R_ProductUpdated,
+           Merged,
+           CessAmount, CourseNo, ChairNo from @saleDetail
+
+
+	-------------SaleComboDetailInsertion-----------------------------------
+
+
+	DELETE R_SalesComboDetail WHERE MasterID in(select MasterID from @saleComboDetail)
+
+	INSERT INTO [dbo].[R_SalesComboDetail]
+           (
+		    DetailGuID
+           ,[ProductID]
+           ,[Quantity]
+           ,[TypeID]
+           ,[MasterProductID]
+		   ,MasterID)
+
+          select
+          DetailGuID,
+           ProductID,
+           Quantity,
+           TypeID,
+           MasterProductID
+		   ,MasterID
+		   from @saleComboDetail
+
+
+----	-------------------SalesPaymentDetailInsertion------------------------------------------------------------
+
+
+	DELETE R_SalesPaymentDetail WHERE MasterID in (select MasterID from @salePaymentDetail)
+
+	INSERT INTO [dbo].[R_SalesPaymentDetail]
+           ([MasterID]
+           ,[Type]
+           ,[Amount]
+           ,[CardNo]
+           ,[CardTypeID]
+           ,[FxTypeID]
+           ,[FxPaid]
+           ,[FxRate]
+           ,[CustomerID]
+           ,[deleted]
+           ,[Cancelled])
+
+           select
+           MasterID,
+           Type,
+           Amount,
+           CardNo,
+           CardTypeID,
+           FxTypeID,
+           FxPaid,
+           FxRate,
+           CustomerID,
+           deleted,
+           Cancelled from @salePaymentDetail
+
+----------------------------SalesProductModifierDetail Insertion------------------------------------------
+
+
+	DELETE R_SalesProductModifierDetail WHERE MasterID in (select MasterID from @saleProductModifierDetail)
+
+	INSERT INTO [dbo].[R_SalesProductModifierDetail]
+           ([MasterID]
+           ,[ProductID]
+           ,[IsVoid]
+           ,[Rate]
+           ,[Quantity]
+           ,[Cancelled]
+           ,[Merged]
+           ,[ModifierID]
+           ,[ParentVoid]
+           ,[VoidReason]
+           ,[WastedQty])
+
+    select
+           MasterID,
+           ProductID,
+           IsVoid,
+           Rate,
+           Quantity,
+           Cancelled,
+           Merged,
+           ModifierID,
+           ParentVoid,
+           VoidReason,
+           WastedQty from @saleProductModifierDetail
+-- ------------------------SalesMiscellaneousSalesAmount Insertion------------------------------------------
+ DELETE [R_MiscellaneousSalesAmount] WHERE MasterID in (select MasterID from @miscellaneousSalesAmount)
+ INSERT INTO [dbo].[R_MiscellaneousSalesAmount]
+    ([MasterID]
+	 ,[DelveryID]
+	 ,[ContainerID]
+	 ,[OthrchargeID]
+	 ,[DelAmount]
+	 ,[ContAmount]
+	 ,[OtherAmount]
+	 ,[DayCloseStatus]
+	 ,[Merged])
+  select
+       MasterID,
+	   DelveryID,
+       ContainerID,
+	   OthrchargeID,
+	   DelAmount,
+	   ContAmount,
+	   OtherAmount,
+	   DayCloseStatus,
+	   Merged from @miscellaneousSalesAmount
+
+ ------------------------SalesDeliveryDetails Insertion------------------------------------------
+
+
+ --DELETE [R_SalesDeliveryDetails] WHERE MasterID in(select MasterID from @saleDeliveryDetail)
+
+ --INSERT INTO [dbo].[R_SalesDeliveryDetails]
+ --          ([MasterID]
+ --          ,[CustomerID]
+ --          ,[EmployeeID]
+ --          ,[DeliveryDate]
+ --          ,[DeliveryTime]
+ --          ,[DeliveryRemarks])
+
+	--	select
+ --          MasterID,
+ --          CustomerID,
+ --          EmployeeID,
+ --          DeliveryDate,
+ --          DeliveryTime,
+ --          DeliveryRemarks from @saleDeliveryDetail
+
+-- ------------------------SalesDelivery Insertion------------------------------------------
+
+ DELETE [R_SalesDelivery] WHERE MasterID in (select MasterID from @saleDelivery)
+
+ INSERT INTO [dbo].[R_SalesDelivery]
+           (
+		   [Guid],
+           [MasterID],
+           [IsClosed])
+    select
+		   newid(),
+           MasterID,
+		   0 from @saleDelivery
+
+
+	   		 COMMIT TRANSACTION
+     END TRY
+   BEGIN CATCH
+        ROLLBACK TRANSACTION
+        RETURN -1
+   END CATCH
+ RETURN 1
+GO
+PRINT 'Recreated restaurant.Sync_Sales_Insert with ComplimentaryReason.';
+GO
+CREATE PROCEDURE [restaurant].[Sync_SalesTemp_Insert]
+
+	@sale Restaurant.Sale READONLY,
+	@saleDetail Restaurant.SaleDetail READONLY,
+	@saleComboDetail Restaurant.SaleComboDetail READONLY,
+	@saleDelivery Restaurant.SaleDelivery READONLY,
+	--@saleDeliveryDetail Restaurant.SaleDeliveryDetail READONLY,
+	@saleProductModifierDetail Restaurant.SaleProductModifierDetail READONLY,
+	@salePaymentDetail Restaurant.SalePaymentDetail READONLY,
+	@miscellaneousSalesAmount Restaurant.MiscellaneousSalesAmount READONLY
+AS
+DECLARE @TransactionDate DATETIME = (SELECT TOP 1 TransactionDate from @sale order by TransactionDate desc)
+DECLARE @BranchID UNIQUEIDENTIFIER = (SELECT TOP 1 BranchID from @sale order by TransactionDate desc)
+
+ BEGIN TRY
+    BEGIN TRANSACTION
+
+	MERGE dbo.[R_SalesTempMaster] AS trg
+    USING @sale AS s
+      ON s.[Guid] = trg.Guid
+     WHEN MATCHED THEN
+       update  set
+	   [GuID] = s.[GuID],
+       [No] = s.[No],
+       [Date] = s.[Date],
+       SectionID = s.SectionID,
+       CounterID = s.CounterID,
+       BillTime =s.BillTime,
+       CustomerID = s.CustomerID,
+       Total = s.Total,
+       RTotal = s.RTotal,
+       Tax = s.Tax,
+       Cash = s.Cash,
+       [Card] = s.[Card],
+       CardNo = s.CardNo,
+       FxPaid = s.FxPaid,
+       FxTypeID = s.FxTypeID,
+       FxRate = s.FxRate,
+       FxAmount = s.FxAmount,
+       CustomerCredit = s.CustomerCredit,
+       Discount = s.Discount,
+	   DiscountPercentage = s.DiscountPercentage,
+	   RoundOff = s.RoundOff,
+       FinancialYearID = s.FinancialYearID,
+       UserID = s.UserID,
+       CreatedBy = s.CreatedBy,
+       Remarks = s.Remarks,
+       CompanyID = s.CompanyID,
+       BranchID = s.BranchID,
+       Deleted = s.Deleted,
+       Refund = s.Refund,
+       TransactionDate = s.TransactionDate,
+       Cancelled = s.Cancelled,
+       WaiterID = s.WaiterID,
+       IsPending = s.IsPending,
+       ProdDiscount = s.ProdDiscount,
+       CustomerGSTNo = s.CustomerGSTNo,
+       BillNo = s.BillNo,
+       SeriesType = s.SeriesType,
+       TableID =s. TableID,
+       TokenNo = s.TokenNo,
+       IsDespatched = s.IsDespatched,
+       IsSettled = s.IsSettled,
+       DeliveryDate = s.DeliveryDate,
+       DeliveryTime = s.DeliveryTime,
+       DeliveryRemarks =s. DeliveryRemarks,
+       IsShiftClosed = s.IsShiftClosed,
+       TabBillNo = s.TabBillNo,
+       ChairPositions = s.ChairPositions,
+       NoOfChairs = s.NoOfChairs,
+       RedeemPoints =s. RedeemPoints,
+       Redeem = s.Redeem,
+       TabID = s.TabID,
+       Pax = s.Pax,
+       ShiftNumber = s.ShiftNumber,
+       CardID = s.CardID,
+       CessAmount = s.CessAmount,
+       IsComplementary = s.IsComplementary,
+       ComplementaryTotal = s.ComplementaryTotal,
+       WaiterRemarks = s.WaiterRemarks,
+       IsSaved = s.IsSaved,
+       IsTakenForUpload = s.IsTakenForUpload,
+       EditedAfterUpload = s.EditedAfterUpload,
+	   VehicleNo = s.VehicleNo,
+	   Merged = s.Merged,
+	   LastUpdate = s.LastUpdate,
+	   CancelReason = s.CancelReason,
+	   ComplimentaryReason = s.ComplimentaryReason,
+	   IsPrintedFromPay = s.IsPrintedFromPay,
+	   UpdatedUser = s.UpdatedUser,
+	   OrderType = S.OrderType,
+	   OrderOpenedDateTime = S.OrderOpenedDateTime,
+	   OrderClosedDateTime = S.OrderClosedDateTime
+     WHEN NOT MATCHED BY TARGET THEN
+      INSERT
+	(
+			[GuID],
+            [No]
+           ,[Date]
+           ,[SectionID]
+           ,[CounterID]
+           ,[BillTime]
+           ,[CustomerID]
+           ,[Total]
+           ,[RTotal]
+           ,[Tax]
+           ,[Cash]
+           ,[Card]
+           ,[CardNo]
+           ,[FxPaid]
+           ,[FxTypeID]
+           ,[FxRate]
+           ,[FxAmount]
+           ,[CustomerCredit]
+           ,[Discount]
+           ,[DiscountPercentage]
+           ,[RoundOff]
+           ,[FinancialYearID]
+           ,[UserID]
+           ,[CreatedBy]
+           ,[Remarks]
+           ,[CompanyID]
+           ,[BranchID]
+           ,[Deleted]
+           ,[Refund]
+           ,[TransactionDate]
+           ,[Cancelled]
+           ,[WaiterID]
+           ,[IsPending]
+           ,[ProdDiscount]
+           ,[CustomerGSTNo]
+           ,[BillNo]
+           ,[SeriesType]
+           ,[TableID]
+           ,[TokenNo]
+           ,[IsDespatched]
+           ,[IsSettled]
+           ,[DeliveryDate]
+           ,[DeliveryTime]
+           ,[DeliveryRemarks]
+           ,[IsShiftClosed]
+           ,[TabBillNo]
+           ,[ChairPositions]
+           ,[NoOfChairs]
+           ,[RedeemPoints]
+           ,[Redeem]
+           ,[TabID]
+           ,[Pax]
+           ,[ShiftNumber]
+           ,[CardID]
+           ,[CessAmount]
+           ,[IsComplementary]
+           ,[ComplementaryTotal]
+           ,[WaiterRemarks]
+           ,[IsSaved]
+           ,[IsTakenForUpload]
+           ,[EditedAfterUpload]
+		   ,[VehicleNo]
+		   ,Merged
+		   ,LastUpdate
+		   ,CancelReason
+		   ,ComplimentaryReason
+		   ,IsPrintedFromPay
+		   ,UpdatedUser,
+		   OrderType,OrderOpenedDateTime,OrderClosedDateTime)
+     values
+	     ( [GuID],
+          [No],
+          [Date],
+          SectionID,
+          CounterID,
+          BillTime,
+          CustomerID,
+          Total,
+          RTotal,
+          Tax,
+          Cash,
+          [Card],
+          CardNo,
+          FxPaid,
+          FxTypeID,
+          FxRate,
+          FxAmount,
+          CustomerCredit,
+          Discount,
+          DiscountPercentage,
+          RoundOff,
+          FinancialYearID,
+          UserID,
+          CreatedBy,
+          Remarks,
+          CompanyID,
+          BranchID,
+          Deleted,
+          Refund,
+          TransactionDate,
+          Cancelled,
+          WaiterID,
+          IsPending,
+          ProdDiscount,
+          CustomerGSTNo,
+          BillNo,
+          SeriesType,
+          TableID,
+          TokenNo,
+          IsDespatched,
+          IsSettled,
+          DeliveryDate,
+          DeliveryTime,
+          DeliveryRemarks,
+          IsShiftClosed,
+          TabBillNo,
+          ChairPositions,
+          NoOfChairs,
+          RedeemPoints,
+          Redeem,
+          TabID,
+          Pax,
+          ShiftNumber,
+          CardID,
+          CessAmount,
+          IsComplementary,
+          ComplementaryTotal,
+          WaiterRemarks,
+          IsSaved,
+          IsTakenForUpload,
+          EditedAfterUpload,
+		  VehicleNo,
+		  Merged
+		  ,LastUpdate
+		  ,CancelReason
+		  ,ComplimentaryReason
+		  ,IsPrintedFromPay
+		  ,UpdatedUser,
+		  OrderType,OrderOpenedDateTime,OrderClosedDateTime) ;
+
+
+	-------------------SalesDetailInsertion--------------------------------------------------
+
+
+	DELETE R_SalesTempDetail WHERE MasterID in (select MasterID from @saleDetail)
+
+	INSERT INTO [dbo].[R_SalesTempDetail]
+           (
+		   [GuID],
+           [MasterID]
+           ,[ProductID]
+           ,[Quantity]
+           ,[BaseQuantity]
+           ,[UnitRate]
+           ,[TaxID]
+           ,[TaxPercentage]
+           ,[Tax]
+           ,[DiscPercentage]
+           ,[Discount]
+           ,[UnitID]
+           ,[ItemTypeID]
+           ,[Deleted]
+           ,[IsTaxIncludedInPrice]
+           ,[Cancelled]
+           ,[IsStockUpdated]
+           ,[Remarks]
+           ,[R_ProductUpdated]
+           ,[Merged]
+           ,[CessAmount], ChairNo, CourseNo)
+
+          select
+		  [GuID],
+           MasterID,
+           ProductID,
+           Quantity,
+           BaseQuantity,
+           UnitRate,
+           TaxID,
+           TaxPercentage,
+           Tax,
+           DiscPercentage,
+           Discount,
+           UnitID,
+           ItemTypeID,
+           Deleted,
+           IsTaxIncludedInPrice,
+           Cancelled,
+           IsStockUpdated,
+           Remarks,
+           R_ProductUpdated,
+           Merged,
+           CessAmount, ChairNo, CourseNo from @saleDetail
+
+
+	-------------SaleComboDetailInsertion-----------------------------------
+
+	DELETE [R_SalesTempComboDetail] WHERE MasterID in(select MasterID from @saleComboDetail)
+
+	INSERT INTO [dbo].[R_SalesTempComboDetail]
+           (
+		    DetailGuID
+           ,[ProductID]
+           ,[Quantity]
+           ,[TypeID]
+           ,[MasterProductID]
+		   ,MasterID)
+
+          select
+          DetailGuID,
+           ProductID,
+           Quantity,
+           TypeID,
+           MasterProductID
+		   ,MasterID
+		   from @saleComboDetail
+
+
+--	-------------------SalesPaymentDetailInsertion------------------------------------------------------------
+
+
+	DELETE R_SalesTempPaymentDetail WHERE MasterID in (select MasterID from @salePaymentDetail)
+
+	INSERT INTO [dbo].[R_SalesTempPaymentDetail]
+           ([MasterID]
+           ,[Type]
+           ,[Amount]
+           ,[CardNo]
+           ,[CardTypeID]
+           ,[FxTypeID]
+           ,[FxPaid]
+           ,[FxRate]
+           ,[CustomerID]
+           ,[deleted]
+           ,[Cancelled])
+
+           select
+           MasterID,
+           Type,
+           Amount,
+           CardNo,
+           CardTypeID,
+           FxTypeID,
+           FxPaid,
+           FxRate,
+           CustomerID,
+           deleted,
+           Cancelled from @salePaymentDetail
+
+--------------------------SalesProductModifierDetail Insertion------------------------------------------
+
+
+	DELETE R_SalesTempProductModifierDetail WHERE MasterID in (select MasterID from @saleProductModifierDetail)
+
+	INSERT INTO [dbo].[R_SalesTempProductModifierDetail]
+           ([MasterID]
+           ,[ProductID]
+           ,[IsVoid]
+           ,[Rate]
+           ,[Quantity]
+           ,[Cancelled]
+           ,[Merged]
+           ,[ModifierID]
+           ,[ParentVoid]
+           ,[VoidReason]
+           ,[WastedQty])
+
+    select
+           MasterID,
+           ProductID,
+           IsVoid,
+           Rate,
+           Quantity,
+           Cancelled,
+           Merged,
+           ModifierID,
+           ParentVoid,
+           VoidReason,
+           WastedQty from @saleProductModifierDetail
+ -- ------------------------SalesMiscellaneousSalesAmount Insertion------------------------------------------
+ DELETE [R_MiscellaneousSalesAmount] WHERE MasterID in (select MasterID from @miscellaneousSalesAmount)
+ INSERT INTO [dbo].[R_MiscellaneousSalesAmount]
+    ([MasterID]
+	 ,[DelveryID]
+	 ,[ContainerID]
+	 ,[OthrchargeID]
+	 ,[DelAmount]
+	 ,[ContAmount]
+	 ,[OtherAmount]
+	 ,[DayCloseStatus]
+	 ,[Merged])
+  select
+       MasterID,
+	   DelveryID,
+       ContainerID,
+	   OthrchargeID,
+	   DelAmount,
+	   ContAmount,
+	   OtherAmount,
+	   DayCloseStatus,
+	   Merged from @miscellaneousSalesAmount
+
+ ------------------------SalesDeliveryDetails Insertion------------------------------------------
+
+
+ --DELETE [R_SalesTempDeliveryDetails] WHERE MasterID in(select MasterID from @saleDeliveryDetail)
+
+ --INSERT INTO [dbo].[R_SalesTempDeliveryDetails]
+ --          ([MasterID]
+ --          ,[CustomerID]
+ --          ,[EmployeeID]
+ --          ,[DeliveryDate]
+ --          ,[DeliveryTime]
+ --          ,[DeliveryRemarks])
+
+	--	select
+ --          MasterID,
+ --          CustomerID,
+ --          EmployeeID,
+ --          DeliveryDate,
+ --          DeliveryTime,
+ --          DeliveryRemarks from @saleDeliveryDetail
+
+ ------------------------SalesDelivery Insertion------------------------------------------
+
+ --DELETE [R_SalesTempDelivery] WHERE MasterID in (select MasterID from @saleDelivery)
+
+ --INSERT INTO [dbo].[R_SalesTempDelivery]
+ --          (
+ --          [IsClosed],
+ --          [MasterID])
+ --    select
+	--	   1,
+ --          MasterID from @saleDelivery
+
+------------------------------------
+
+ DELETE [R_SalesTempDelivery] WHERE MasterID in (select MasterID from @saleDelivery)
+
+ INSERT INTO [dbo].[R_SalesTempDelivery]
+           (
+		   [Guid],
+           [MasterID],
+           [IsClosed])
+    select
+		   newid(),
+           MasterID,
+		   1 from @saleDelivery
+
+
+
+	DELETE FROM [R_SalesMaster]
+	WHERE TransactionDate<=@TransactionDate AND BranchID = @BranchID
+
+	DELETE FROM [R_SalesDetail]
+	WHERE MasterID NOT IN (SELECT [Guid] FROM [R_SalesMaster])
+
+	DELETE FROM [R_SalesComboDetail]
+	WHERE DetailGuID NOT IN (SELECT [Guid] FROM [R_SalesDetail])
+
+	DELETE FROM R_SalesPaymentDetail
+	WHERE MasterID NOT IN (SELECT [Guid] FROM [R_SalesMaster])
+
+	DELETE FROM R_SalesProductModifierDetail
+	WHERE MasterID NOT IN (SELECT [Guid] FROM [R_SalesMaster])
+
+	DELETE FROM [R_SalesDeliveryDetails]
+	WHERE MasterID NOT IN (SELECT [Guid] FROM [R_SalesMaster])
+
+	DELETE FROM [R_SalesDelivery]
+	WHERE MasterID NOT IN (SELECT [Guid] FROM [R_SalesMaster])
+
+	DELETE FROM R_SalesED
+	WHERE MasterID NOT IN (SELECT [Guid] FROM [R_SalesMaster])
+
+
+
+	COMMIT TRANSACTION
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION
+        RETURN -1
+   END CATCH
+ RETURN 1
+GO
+PRINT 'Recreated restaurant.Sync_SalesTemp_Insert with ComplimentaryReason.';
+GO
+Create PROCEDURE [restaurant].[sale_temp_insert]
+
+	@sale Restaurant.Sale READONLY,
+	@saleDetail Restaurant.SaleDetail READONLY,
+	@saleComboDetail Restaurant.SaleComboDetail READONLY,
+	@salePaymentDetail Restaurant.SalePaymentDetail READONLY,
+	@saleProductModifierDetail Restaurant.SaleProductModifierDetail READONLY,
+	@saleDeliveryDetail Restaurant.SaleDeliveryDetail READONLY,
+	@saleDelivery Restaurant.SaleDelivery READONLY
+AS
+
+begin
+MERGE dbo.[R_SalesTempMaster] AS trg
+    USING @sale AS s
+      ON s.Guid = trg.Guid
+     WHEN MATCHED THEN
+       update  set
+
+       [No] = s.No,
+       [Date] = s.Date,
+       SectionID = s.SectionID,
+       CounterID = s.CounterID,
+       BillTime =s.BillTime,
+       CustomerID = s.CustomerID,
+       Total = s.Total,
+       RTotal = s.RTotal,
+       Tax = s.Tax,
+       Cash = s.Cash,
+       [Card] = s.Card,
+       CardNo = s.CardNo,
+       FxPaid = s.FxPaid,
+       FxTypeID = s.FxTypeID,
+       FxRate = s.FxRate,
+       FxAmount = s.FxAmount,
+       CustomerCredit = s.CustomerCredit,
+       Discount = s.Discount,
+	   DiscountPercentage = s.DiscountPercentage,
+	   RoundOff = s.RoundOff,
+       FinancialYearID = s.FinancialYearID,
+       UserID = s.UserID,
+       CreatedBy = s.CreatedBy,
+       Remarks = s.Remarks,
+       CompanyID = s.CompanyID,
+       BranchID = s.BranchID,
+       Deleted = s.Deleted,
+       Refund = s.Refund,
+       TransactionDate = s.TransactionDate,
+       Cancelled = s.Cancelled,
+       WaiterID = s.WaiterID,
+       IsPending = s.IsPending,
+       ProdDiscount = s.ProdDiscount,
+       CustomerGSTNo = s.CustomerGSTNo,
+       BillNo = s.BillNo,
+       SeriesType = s.SeriesType,
+       TableID =s. TableID,
+       TokenNo = s.TokenNo,
+       IsDespatched = s.IsDespatched,
+       IsSettled = s.IsSettled,
+       DeliveryDate = s.DeliveryDate,
+       DeliveryTime = s.DeliveryTime,
+       DeliveryRemarks =s. DeliveryRemarks,
+       IsShiftClosed = s.IsShiftClosed,
+       TabBillNo = s.TabBillNo,
+       ChairPositions = s.ChairPositions,
+       NoOfChairs = s.NoOfChairs,
+       RedeemPoints =s. RedeemPoints,
+       Redeem = s.Redeem,
+       TabID = s.TabID,
+       Pax = s.Pax,
+       ShiftNumber = s.ShiftNumber,
+       CardID = s.CardID,
+       CessAmount = s.CessAmount,
+       IsComplementary = s.IsComplementary,
+       ComplementaryTotal = s.ComplementaryTotal,
+       WaiterRemarks = s.WaiterRemarks,
+       IsSaved = s.IsSaved,
+       IsTakenForUpload = s.IsTakenForUpload,
+       EditedAfterUpload = s.EditedAfterUpload,
+	   VehicleNo = s.VehicleNo,
+	   Merged = s.Merged ,
+	   OrderType = s.OrderType
+     WHEN NOT MATCHED BY TARGET THEN
+      INSERT
+	(
+			[GuID],
+            [No]
+           ,[Date]
+           ,[SectionID]
+           ,[CounterID]
+           ,[BillTime]
+           ,[CustomerID]
+           ,[Total]
+           ,[RTotal]
+           ,[Tax]
+           ,[Cash]
+           ,[Card]
+           ,[CardNo]
+           ,[FxPaid]
+           ,[FxTypeID]
+           ,[FxRate]
+           ,[FxAmount]
+           ,[CustomerCredit]
+           ,[Discount]
+           ,[DiscountPercentage]
+           ,[RoundOff]
+           ,[FinancialYearID]
+           ,[UserID]
+           ,[CreatedBy]
+           ,[Remarks]
+           ,[CompanyID]
+           ,[BranchID]
+           ,[Deleted]
+           ,[Refund]
+           ,[TransactionDate]
+           ,[Cancelled]
+           ,[WaiterID]
+           ,[IsPending]
+           ,[ProdDiscount]
+           ,[CustomerGSTNo]
+           ,[BillNo]
+           ,[SeriesType]
+           ,[TableID]
+           ,[TokenNo]
+           ,[IsDespatched]
+           ,[IsSettled]
+           ,[DeliveryDate]
+           ,[DeliveryTime]
+           ,[DeliveryRemarks]
+           ,[IsShiftClosed]
+           ,[TabBillNo]
+           ,[ChairPositions]
+           ,[NoOfChairs]
+           ,[RedeemPoints]
+           ,[Redeem]
+           ,[TabID]
+           ,[Pax]
+           ,[ShiftNumber]
+           ,[CardID]
+           ,[CessAmount]
+           ,[IsComplementary]
+           ,[ComplementaryTotal]
+           ,[WaiterRemarks]
+           ,[IsSaved]
+           ,[IsTakenForUpload]
+           ,[EditedAfterUpload]
+		   ,[VehicleNo]
+		   ,Merged
+		   ,OrderType)
+     values
+	     ( GuID,
+          No,
+          Date,
+          SectionID,
+          CounterID,
+          BillTime,
+          CustomerID,
+          Total,
+          RTotal,
+          Tax,
+          Cash,
+          Card,
+          CardNo,
+          FxPaid,
+          FxTypeID,
+          FxRate,
+          FxAmount,
+          CustomerCredit,
+          Discount,
+          DiscountPercentage,
+          RoundOff,
+          FinancialYearID,
+          UserID,
+          CreatedBy,
+          Remarks,
+          CompanyID,
+          BranchID,
+          Deleted,
+          Refund,
+          TransactionDate,
+          Cancelled,
+          WaiterID,
+          IsPending,
+          ProdDiscount,
+          CustomerGSTNo,
+          BillNo,
+          SeriesType,
+          TableID,
+          TokenNo,
+          IsDespatched,
+          IsSettled,
+          DeliveryDate,
+          DeliveryTime,
+          DeliveryRemarks,
+          IsShiftClosed,
+          TabBillNo,
+          ChairPositions,
+          NoOfChairs,
+          RedeemPoints,
+          Redeem,
+          TabID,
+          Pax,
+          ShiftNumber,
+          CardID,
+          CessAmount,
+          IsComplementary,
+          ComplementaryTotal,
+          WaiterRemarks,
+          IsSaved,
+          IsTakenForUpload,
+          EditedAfterUpload,
+		  VehicleNo,
+		  Merged,
+		  OrderType) ;
+
+
+	   end
+
+	-------------------SalesTempDetailInsertion--------------------------------------------------
+
+
+	DELETE R_SalesTempDetail WHERE MasterID in (select MasterID from @saleDetail)
+
+	INSERT INTO [dbo].[R_SalesTempDetail]
+           (
+           [MasterID]
+           ,[ProductID]
+           ,[Quantity]
+           ,[BaseQuantity]
+           ,[UnitRate]
+           ,[TaxID]
+           ,[TaxPercentage]
+           ,[Tax]
+           ,[DiscPercentage]
+           ,[Discount]
+           ,[UnitID]
+           ,[ItemTypeID]
+           ,[Deleted]
+           ,[IsTaxIncludedInPrice]
+           ,[Cancelled]
+           ,[IsStockUpdated]
+           ,[Remarks]
+           ,[R_ProductUpdated]
+           ,[Merged]
+           ,[CessAmount], ChairNo, CourseNo)
+
+          select
+           MasterID,
+           ProductID,
+           Quantity,
+           BaseQuantity,
+           UnitRate,
+           TaxID,
+           TaxPercentage,
+           Tax,
+           DiscPercentage,
+           Discount,
+           UnitID,
+           ItemTypeID,
+           Deleted,
+           IsTaxIncludedInPrice,
+           Cancelled,
+           IsStockUpdated,
+           Remarks,
+           R_ProductUpdated,
+           Merged,
+           CessAmount, ChairNo, CourseNo from @saleDetail
+
+
+	-------------SaleTempComboDetailInsertion-----------------------------------
+
+
+
+	DELETE R_SalesTempComboDetail WHERE MasterID in(select MasterID from @saleComboDetail)
+
+	INSERT INTO [dbo].[R_SalesTempComboDetail]
+           (
+          [ProductID]
+           ,[Quantity]
+           ,[TypeID]
+           ,[MasterProductID]
+
+		   ,MasterID)
+
+          select
+
+           ProductID,
+           Quantity,
+           TypeID,
+           MasterProductID
+
+		   ,MasterID from @saleComboDetail
+
+	-------------------SalesTempPaymentDetailInsertion------------------------------------------------------------
+
+
+	DELETE R_SalesTempPaymentDetail WHERE MasterID in (select MasterID from @salePaymentDetail)
+
+	INSERT INTO [dbo].[R_SalesTempPaymentDetail]
+           ([MasterID]
+           ,[Type]
+           ,[Amount]
+           ,[CardNo]
+           ,[CardTypeID]
+           ,[FxTypeID]
+           ,[FxPaid]
+           ,[FxRate]
+           ,[CustomerID]
+           ,[deleted]
+           ,[Cancelled])
+
+           select
+           MasterID,
+           Type,
+           Amount,
+           CardNo,
+           CardTypeID,
+           FxTypeID,
+           FxPaid,
+           FxRate,
+           CustomerID,
+           deleted,
+           Cancelled from @salePaymentDetail
+
+------------------------SalesTempProductModifierDetail Insertion------------------------------------------
+
+
+	DELETE R_SalesTempProductModifierDetail WHERE MasterID in (select MasterID from @saleProductModifierDetail)
+
+	INSERT INTO [dbo].[R_SalesTempProductModifierDetail]
+           ([MasterID]
+           ,[ProductID]
+           ,[IsVoid]
+           ,[Rate]
+           ,[Quantity]
+           ,[Cancelled]
+           ,[Merged]
+           ,[ModifierID]
+           ,[ParentVoid]
+           ,[VoidReason]
+           ,[WastedQty])
+
+    select
+           MasterID,
+           ProductID,
+           IsVoid,
+           Rate,
+           Quantity,
+           Cancelled,
+           Merged,
+           ModifierID,
+           ParentVoid,
+           VoidReason,
+           WastedQty from @saleProductModifierDetail
+
+ ------------------------SalesTempDeliveryDetails Insertion------------------------------------------
+
+
+ DELETE [R_SalesTempDeliveryDetails] WHERE MasterID in (select MasterID from @saleDeliveryDetail)
+
+ INSERT INTO [dbo].[R_SalesTempDeliveryDetails]
+           ([MasterID]
+           ,[CustomerID]
+           ,[EmployeeID]
+           ,[DeliveryDate]
+           ,[DeliveryTime]
+           ,[DeliveryRemarks])
+
+		select
+           MasterID,
+           CustomerID,
+           EmployeeID,
+           DeliveryDate,
+           DeliveryTime,
+           DeliveryRemarks from @saleDeliveryDetail
+
+-----------------------------------------------------------------
+
+ DELETE [R_SalesDeliveryDetails] WHERE MasterID in(select MasterID from @saleDeliveryDetail)
+
+ INSERT INTO [dbo].[R_SalesDeliveryDetails]
+           ([MasterID]
+           ,[CustomerID]
+           ,[EmployeeID]
+           ,[DeliveryDate]
+           ,[DeliveryTime]
+           ,[DeliveryRemarks])
+
+		select
+           MasterID,
+           CustomerID,
+           EmployeeID,
+           DeliveryDate,
+           DeliveryTime,
+           DeliveryRemarks from @saleDeliveryDetail
+
+ ------------------------SalesTempDelivery Insertion------------------------------------------
+
+ DELETE [R_SalesTempDelivery] WHERE MasterID in (select MasterID from @saleDelivery)
+
+ INSERT INTO [dbo].[R_SalesTempDelivery]
+           (
+           [IsClosed],
+           [MasterID])
+     select
+		   1,
+           MasterID from @saleDelivery
+
+------------------------------------
+
+ DELETE [R_SalesDelivery] WHERE MasterID in (select MasterID from @saleDelivery)
+
+ INSERT INTO [dbo].[R_SalesDelivery]
+           (
+		   [Guid],
+           [MasterID],
+           [IsClosed])
+    select
+		   newid(),
+           MasterID,
+		   1 from @saleDelivery
+
+
+GO
+PRINT 'Recreated restaurant.sale_temp_insert (unchanged, only needed re-creation to unblock UDT alter).';
+GO
+-- restaurant.Sync_Sales_GetAll (Windows-side sync source proc read by Axobis.Restaurant.Server.Sync's
+-- SalesSyncHandler.GetAllSales - must select OrderType or the C# row["OrderType"] mapping throws and
+-- breaks the whole sales upload batch for this customer)
+-- Kashkan fix: added ComplimentaryReason so it flows through the sync pipeline like CancelReason already does.
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_Sales_GetAll]
+	@Version BIGINT = NULL
+AS
+
+    SET NOCOUNT ON
+
+	SELECT SM.ID,SM.[GuID],[No],[Date],SectionID,CounterID,BillTime,CustomerID,Total,RTotal,Tax,Cash,[Card],[CardNo],
+	FxPaid,FxTypeID,FxRate,FxAmount,CustomerCredit,Discount,DiscountPercentage,RoundOff,FinancialYearID,
+	UserID,CreatedBy,Remarks,CompanyID,LastUpdate,BranchID,Deleted,Refund,TransactionDate,IsPending,
+	BillTypeID,Cancelled,WaiterID,ProdDiscount,CustomerGSTNo,BillNo,SeriesType,TableID,CancelReason,ComplimentaryReason,
+	TokenNo,IsDespatched,IsSettled,DeliveryDate,DeliveryTime,DeliveryRemarks,IsShiftClosed,ShiftNumber,
+	TabID,Merged,Pax,Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
+	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
+	TabOrderNo,convert(BIGINT,Version)[Version],UpdatedUser
+	,SD.[GuID] AS DeliveryID, OrderType, OrderOpenedDateTime, OrderClosedDateTime
+	FROM [R_SalesMaster] SM
+	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
+	WHERE [Version] > @Version
+
+	SELECT *  FROM [R_SalesDetail]
+
+	SELECT [GuID],MasterID,[Type],[Amount],CardNo,CardTypeID,FxTypeID,FxPaid,FxRate,[CustomerID],deleted,Cancelled
+	FROM [dbo].[R_SalesPaymentDetail]
+
+	SELECT * FROM R_SalesProductModifierDetail
+
+	SELECT * FROM [R_SalesComboDetail]
+
+	SELECT * FROM [R_SalesDelivery]
+
+	SELECT * FROM [R_MiscellaneousSalesAmount]
+
+	SET NOCOUNT OFF
+GO
+PRINT 'Fixed restaurant.Sync_Sales_GetAll to include ComplimentaryReason.';
+GO
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_SalesTemp_GetAll]
+	@Version BIGINT = NULL
+AS
+
+    SET NOCOUNT ON
+
+	SELECT  SM.ID,SM.[GuID],[No],[Date],SectionID,CounterID,BillTime,CustomerID,Total,RTotal,Tax,Cash,[Card],[CardNo],
+	FxPaid,FxTypeID,FxRate,FxAmount,CustomerCredit,Discount,DiscountPercentage,RoundOff,FinancialYearID,
+	UserID,CreatedBy,Remarks,CompanyID,LastUpdate,BranchID,Deleted,Refund,TransactionDate,IsPending,
+	Cancelled,WaiterID,ProdDiscount,CustomerGSTNo,BillNo,SeriesType,TableID,CancelReason,ComplimentaryReason,
+	TokenNo,ISNULL(IsDespatched,0)IsDespatched,ISNULL(IsSettled,0)IsSettled,DeliveryDate,DeliveryTime,DeliveryRemarks,ISNULL(IsShiftClosed,0)IsShiftClosed,ShiftNumber,
+	TabID,Merged,Pax,ISNULL(Redeem,0)Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
+	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
+	convert(BIGINT,Version)[Version],UpdatedUser
+	,SD.[GuID] AS DeliveryID, OrderOpenedDateTime, OrderClosedDateTime
+	FROM [R_SalesTempMaster] SM
+	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
+	WHERE [Version] > @Version
+
+	SELECT * FROM [R_SalesTempDetail]
+
+	SELECT * FROM [dbo].[R_SalesTempPaymentDetail]
+
+	SELECT * FROM R_SalesTempProductModifierDetail
+
+	SELECT * FROM [R_SalesTempComboDetail]
+
+	SELECT * FROM [R_SalesTempDelivery]
+
+	--SELECT * FROM [R_SalesTempDeliveryDetails]
+
+
+	SET NOCOUNT OFF
+GO
+PRINT 'Fixed restaurant.Sync_SalesTemp_GetAll to include ComplimentaryReason.';
+GO
+
+PRINT 'Section AA complete.';
+GO
+
+-- ============================================================
+-- Section AB - Kashkan Phase 4: Void Report (Req #3), backend only.
+-- Depends on dbo.R_VoidLog (created in Section AA's predecessor round,
+-- Phase 3). New item-level report distinct from the existing
+-- invoice-level GetSalesStatusReport: order #, item, qty voided,
+-- reason, who voided it, and when. Two SPs follow the same
+-- non-paged/paged pairing used throughout this file (e.g.
+-- Report_ItemWiseSalesreport / Report_ItemWiseSalesreportPaging).
+-- No React/WinForms UI in this round - contract documented for the
+-- frontend handover doc; this is the WebAPI-facing backend only.
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_VoidLog]
+(
+ @FromDate   DATE          = NULL,
+ @ToDate     DATE          = NULL,
+ @BranchID   VARCHAR(MAX)  = NULL,
+ @SectionID  VARCHAR(MAX)  = NULL,
+ @CounterID  VARCHAR(MAX)  = NULL,
+ @ProductID  VARCHAR(MAX)  = NULL,
+ @UserID     VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate  DATE          = @FromDate,
+	     @R_ToDate    DATE          = @ToDate,
+	     @R_BranchID  VARCHAR(MAX)  = NULLIF(@BranchID,''),
+	     @R_SectionID VARCHAR(MAX)  = NULLIF(@SectionID,''),
+	     @R_CounterID VARCHAR(MAX)  = NULLIF(@CounterID,''),
+	     @R_ProductID VARCHAR(MAX)  = NULLIF(@ProductID,''),
+	     @R_UserID    VARCHAR(MAX)  = NULLIF(@UserID,'')
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	SELECT VL.BillNo, VL.VoidedDate, VL.ProductName AS Product, VL.Quantity, VL.UnitRate, VL.Reason,
+	       VL.VoidedByUserName AS [User], ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch]
+	FROM [dbo].[R_VoidLog] VL
+	LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = VL.SectionID
+	LEFT OUTER JOIN R_Counter C ON C.[GuID] = VL.CounterID
+	LEFT OUTER JOIN R_Branch B ON B.[GuID] = VL.BranchID
+	WHERE (VL.VoidedDate >= @R_FromDate OR @R_FromDate IS NULL)
+	AND (VL.VoidedDate < @R_ToDate OR @R_ToDate IS NULL)
+	AND (VL.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+	AND (VL.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+	AND (VL.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+	AND (VL.ProductID = @R_ProductID OR @R_ProductID IS NULL)
+	AND (VL.VoidedByUserID = @R_UserID OR @R_UserID IS NULL)
+	ORDER BY VL.VoidedDate DESC;
+
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_VoidLog.';
+GO
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_VoidLogPaging]
+(
+ @FromDate         DATE          = NULL,
+ @ToDate           DATE          = NULL,
+ @BranchID         VARCHAR(MAX)  = NULL,
+ @SectionID        VARCHAR(MAX)  = NULL,
+ @CounterID        VARCHAR(MAX)  = NULL,
+ @ProductID        VARCHAR(MAX)  = NULL,
+ @UserID           VARCHAR(MAX)  = NULL,
+ @PageNumber       INT           = NULL,
+ @PageSize         INT           = NULL,
+ @SortingColumn    VARCHAR(MAX)  = NULL,
+ @SortingDirection VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate         DATE           = @FromDate,
+	     @R_ToDate           DATE           = @ToDate,
+	     @R_BranchID         VARCHAR(MAX)   = NULLIF(@BranchID,''),
+	     @R_SectionID        VARCHAR(MAX)   = NULLIF(@SectionID,''),
+	     @R_CounterID        VARCHAR(MAX)   = NULLIF(@CounterID,''),
+	     @R_ProductID        VARCHAR(MAX)   = NULLIF(@ProductID,''),
+	     @R_UserID           VARCHAR(MAX)   = NULLIF(@UserID,''),
+	     @R_PageNumber       INT            = @PageNumber,
+	     @R_PageSize         INT            = @PageSize,
+	     @R_SortingColumn    VARCHAR(MAX)   = @SortingColumn,
+	     @R_SortingDirection VARCHAR(MAX)   = ISNULL(@SortingDirection,'DESC')
+
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#VoidLogReport') IS NOT NULL DROP TABLE #VoidLogReport;
+	IF Object_id('TempDB.dbo.#VoidLogReportCount') IS NOT NULL DROP TABLE #VoidLogReportCount;
+
+	SELECT VL.[GuID],VL.BillNo,VL.VoidedDate,VL.ProductName AS Product,VL.Quantity,VL.UnitRate,VL.Reason,
+	       VL.VoidedByUserName AS [User],ISNULL(S.Name,'')[Section],ISNULL(C.Name,'')[Counter],ISNULL(B.Name,'')[Branch]
+	INTO #VoidLogReport
+	FROM [dbo].[R_VoidLog] VL
+	LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = VL.SectionID
+	LEFT OUTER JOIN R_Counter C ON C.[GuID] = VL.CounterID
+	LEFT OUTER JOIN R_Branch B ON B.[GuID] = VL.BranchID
+	WHERE (VL.VoidedDate >= @R_FromDate OR @R_FromDate IS NULL)
+	AND (VL.VoidedDate < @R_ToDate OR @R_ToDate IS NULL)
+	AND (VL.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+	AND (VL.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+	AND (VL.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+	AND (VL.ProductID = @R_ProductID OR @R_ProductID IS NULL)
+	AND (VL.VoidedByUserID = @R_UserID OR @R_UserID IS NULL);
+
+	SELECT COUNT(*) AS VoidLogCount INTO #VoidLogReportCount FROM #VoidLogReport;
+
+	IF @PageSize=-1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VoidLogCount FROM #VoidLogReportCount)[RowCount] FROM #VoidLogReport ORDER BY VoidedDate '+@R_SortingDirection+',BillNo '+@R_SortingDirection;
+			EXEC(@SortingCmd);
+		END
+		ELSE
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VoidLogCount FROM #VoidLogReportCount)[RowCount],VoidedDate AS VoidedDate1,BillNo AS BillNo1 FROM #VoidLogReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',VoidedDate1 desc,BillNo1 asc';
+			EXEC(@SortingCmd);
+		END
+	END
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VoidLogCount FROM #VoidLogReportCount)[RowCount] FROM #VoidLogReport ORDER BY VoidedDate '+@R_SortingDirection+',BillNo '+@R_SortingDirection+' OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+			EXEC(@SortingCmd);
+		END
+		ELSE
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VoidLogCount FROM #VoidLogReportCount)[RowCount],VoidedDate AS VoidedDate1,BillNo AS BillNo1 FROM #VoidLogReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',VoidedDate1 desc,BillNo1 asc OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+			EXEC(@SortingCmd);
+		END
+	END
+
+	SELECT SUM(Quantity) AS Quantity FROM #VoidLogReport;
+
+	IF Object_id('TempDB.dbo.#VoidLogReport') IS NOT NULL DROP TABLE #VoidLogReport;
+	IF Object_id('TempDB.dbo.#VoidLogReportCount') IS NOT NULL DROP TABLE #VoidLogReportCount;
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_VoidLogPaging.';
+GO
+
+PRINT 'Section AB complete.';
+GO
+
+-- ============================================================
+-- Section AC - Kashkan Phase 5: Order Timing + Captain/Waiter Report
+-- (Req #4), backend only. Depends on OrderOpenedDateTime/
+-- OrderClosedDateTime (added to R_SalesMaster/R_SalesTempMaster in
+-- Section B, and to the sync pipeline via the same reused UDT cycle
+-- in Section AA) already being populated by WinForms/TABApi at
+-- Insert()/settle time. Per-order report (not aggregated like the
+-- existing GetWaiterWiseSale) showing how long each order took from
+-- open to close, per waiter/captain - UNIONs R_SalesMaster (today,
+-- not yet day-closed) and R_SalesTempMaster (already day-closed),
+-- same reason GetWaiterWiseSale does. No React/WinForms UI in this
+-- round - contract documented for the frontend handover doc.
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_OrderTiming]
+(
+ @FromDate   DATE          = NULL,
+ @ToDate     DATE          = NULL,
+ @BranchID   VARCHAR(MAX)  = NULL,
+ @SectionID  VARCHAR(MAX)  = NULL,
+ @CounterID  VARCHAR(MAX)  = NULL,
+ @UserID     VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate  DATE          = @FromDate,
+	     @R_ToDate    DATE          = @ToDate,
+	     @R_BranchID  VARCHAR(MAX)  = NULLIF(@BranchID,''),
+	     @R_SectionID VARCHAR(MAX)  = NULLIF(@SectionID,''),
+	     @R_CounterID VARCHAR(MAX)  = NULLIF(@CounterID,''),
+	     @R_UserID    VARCHAR(MAX)  = NULLIF(@UserID,'')
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	SELECT * FROM (
+		SELECT SM.BillNo, SM.TransactionDate, SM.OrderOpenedDateTime, SM.OrderClosedDateTime,
+		       DATEDIFF(MINUTE, SM.OrderOpenedDateTime, SM.OrderClosedDateTime) AS DurationMinutes,
+		       ISNULL(U.Name,'') AS [User], ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       (SM.Total+SM.Tax+SM.CessAmount-SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff) AS NetTotal
+		FROM R_SalesMaster SM
+		LEFT OUTER JOIN R_User U ON U.[GuID] = SM.WaiterID
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		WHERE SM.Deleted = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+		UNION ALL
+		SELECT SM.BillNo, SM.TransactionDate, SM.OrderOpenedDateTime, SM.OrderClosedDateTime,
+		       DATEDIFF(MINUTE, SM.OrderOpenedDateTime, SM.OrderClosedDateTime) AS DurationMinutes,
+		       ISNULL(U.Name,'') AS [User], ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       (SM.Total+SM.Tax+SM.CessAmount-SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff) AS NetTotal
+		FROM R_SalesTempMaster SM
+		LEFT OUTER JOIN R_User U ON U.[GuID] = SM.WaiterID
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		WHERE SM.Deleted = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+	) AS T
+	ORDER BY OrderOpenedDateTime DESC;
+
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_OrderTiming.';
+GO
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_OrderTimingPaging]
+(
+ @FromDate         DATE          = NULL,
+ @ToDate           DATE          = NULL,
+ @BranchID         VARCHAR(MAX)  = NULL,
+ @SectionID        VARCHAR(MAX)  = NULL,
+ @CounterID        VARCHAR(MAX)  = NULL,
+ @UserID           VARCHAR(MAX)  = NULL,
+ @PageNumber       INT           = NULL,
+ @PageSize         INT           = NULL,
+ @SortingColumn    VARCHAR(MAX)  = NULL,
+ @SortingDirection VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate         DATE           = @FromDate,
+	     @R_ToDate           DATE           = @ToDate,
+	     @R_BranchID         VARCHAR(MAX)   = NULLIF(@BranchID,''),
+	     @R_SectionID        VARCHAR(MAX)   = NULLIF(@SectionID,''),
+	     @R_CounterID        VARCHAR(MAX)   = NULLIF(@CounterID,''),
+	     @R_UserID           VARCHAR(MAX)   = NULLIF(@UserID,''),
+	     @R_PageNumber       INT            = @PageNumber,
+	     @R_PageSize         INT            = @PageSize,
+	     @R_SortingColumn    VARCHAR(MAX)   = @SortingColumn,
+	     @R_SortingDirection VARCHAR(MAX)   = ISNULL(@SortingDirection,'DESC')
+
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#OrderTimingReport') IS NOT NULL DROP TABLE #OrderTimingReport;
+	IF Object_id('TempDB.dbo.#OrderTimingReportCount') IS NOT NULL DROP TABLE #OrderTimingReportCount;
+
+	SELECT * INTO #OrderTimingReport FROM (
+		SELECT SM.BillNo, SM.TransactionDate, SM.OrderOpenedDateTime, SM.OrderClosedDateTime,
+		       DATEDIFF(MINUTE, SM.OrderOpenedDateTime, SM.OrderClosedDateTime) AS DurationMinutes,
+		       ISNULL(U.Name,'') AS [User], ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       (SM.Total+SM.Tax+SM.CessAmount-SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff) AS NetTotal
+		FROM R_SalesMaster SM
+		LEFT OUTER JOIN R_User U ON U.[GuID] = SM.WaiterID
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		WHERE SM.Deleted = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+		UNION ALL
+		SELECT SM.BillNo, SM.TransactionDate, SM.OrderOpenedDateTime, SM.OrderClosedDateTime,
+		       DATEDIFF(MINUTE, SM.OrderOpenedDateTime, SM.OrderClosedDateTime) AS DurationMinutes,
+		       ISNULL(U.Name,'') AS [User], ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       (SM.Total+SM.Tax+SM.CessAmount-SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff) AS NetTotal
+		FROM R_SalesTempMaster SM
+		LEFT OUTER JOIN R_User U ON U.[GuID] = SM.WaiterID
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		WHERE SM.Deleted = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.WaiterID = @R_UserID OR @R_UserID IS NULL)
+	) AS T;
+
+	SELECT COUNT(*) AS OrderTimingCount INTO #OrderTimingReportCount FROM #OrderTimingReport;
+
+	IF @PageSize=-1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT OrderTimingCount FROM #OrderTimingReportCount)[RowCount] FROM #OrderTimingReport ORDER BY OrderOpenedDateTime '+@R_SortingDirection+',BillNo '+@R_SortingDirection;
+			EXEC(@SortingCmd);
+		END
+		ELSE
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT OrderTimingCount FROM #OrderTimingReportCount)[RowCount],OrderOpenedDateTime AS OrderOpenedDateTime1,BillNo AS BillNo1 FROM #OrderTimingReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',OrderOpenedDateTime1 desc,BillNo1 asc';
+			EXEC(@SortingCmd);
+		END
+	END
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT OrderTimingCount FROM #OrderTimingReportCount)[RowCount] FROM #OrderTimingReport ORDER BY OrderOpenedDateTime '+@R_SortingDirection+',BillNo '+@R_SortingDirection+' OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+			EXEC(@SortingCmd);
+		END
+		ELSE
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT OrderTimingCount FROM #OrderTimingReportCount)[RowCount],OrderOpenedDateTime AS OrderOpenedDateTime1,BillNo AS BillNo1 FROM #OrderTimingReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',OrderOpenedDateTime1 desc,BillNo1 asc OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+			EXEC(@SortingCmd);
+		END
+	END
+
+	SELECT AVG(CAST(DurationMinutes AS DECIMAL(18,2))) AS DurationMinutes, SUM(NetTotal) AS NetTotal FROM #OrderTimingReport WHERE DurationMinutes IS NOT NULL;
+
+	IF Object_id('TempDB.dbo.#OrderTimingReport') IS NOT NULL DROP TABLE #OrderTimingReport;
+	IF Object_id('TempDB.dbo.#OrderTimingReportCount') IS NOT NULL DROP TABLE #OrderTimingReportCount;
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_OrderTimingPaging.';
+GO
+
+PRINT 'Section AC complete.';
 GO
