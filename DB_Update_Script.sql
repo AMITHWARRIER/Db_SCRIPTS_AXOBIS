@@ -2943,6 +2943,61 @@ GO
 PRINT 'Created or altered SP Section_GetAllByBranch.';
 GO
 
+-- SP: Sync_Section_GetAll
+-- 2026-08-24: added here for the first time -- same class of bug as Section_GetAllByBranch
+-- directly above, and confirmed missing from this whole script via grep before adding.
+-- The S.ZoneGuID column was added to this proc on 2025-07-30 by a one-off ALTER applied to
+-- ~30 databases only; it was never folded back into this shared script, so every customer
+-- DB that is otherwise fully current on DB_Update_Script.sql still had the pre-2025-07-30
+-- shape. SectionDataAccess.GetAll(Section) reads row["ZONEGUID"] unconditionally, so the
+-- WinForms Section sync (Section/Sync/Download) died with "Column 'ZONEGUID' does not
+-- belong to table Table" surfacing to the client as HTTP 500. Found on customer "alyuom",
+-- which had every Phase 2-5 object present yet still failed for exactly this reason.
+-- Definition below is byte-identical (whitespace-normalised) to defaultDB and to live
+-- customer DB "kashkan". Note WHERE uses CONVERT(BIGINT, SLM.[Version]) -- the old shape
+-- compared the rowversion to @Version implicitly.
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_Section_GetAll]
+(
+	@Version BIGINT = NULL,
+	@BranchID  UNIQUEIDENTIFIER	=	NULL
+)
+AS
+
+    SET NOCOUNT ON
+
+	SELECT S.ID,S.[Guid],[Name],ShortName,Convert(Bigint,SLM.[Version])[Version]
+	,CASE WHEN SLM.IsActive = 0 THEN 1 ELSE Deleted END AS Deleted
+	,SLM.CreatedUser,SLM.CreatedDate,SLM.UpdatedUser,SLM.UpdatedDate, S.ZoneGuID
+	FROM restaurant.SectionLocationMapping SLM 
+	INNER JOIN  restaurant.Section S ON S.[GuID] = SLM.SectionID AND SLM.BranchID = @BranchID
+	WHERE CONVERT(BIGINT, SLM.[Version]) > @Version
+
+	SET NOCOUNT OFF
+GO
+PRINT 'Created or altered SP Sync_Section_GetAll.';
+GO
+
+-- SP: Section_GetAll
+-- 2026-08-24: added here for the first time (grep-confirmed absent), for the same reason as
+-- Sync_Section_GetAll above -- it is missing the ZoneGuID column on every DB that never got
+-- the 2025-07-30 one-off ALTER. SectionDataAccess.GetAll() reads row["ZoneGuID"], so
+-- GET api/Section/GetAll returns HTTP 500 on those DBs. Same latent failure, different
+-- endpoint: the WebApp section list rather than the WinForms sync.
+CREATE OR ALTER PROCEDURE [restaurant].[Section_GetAll]
+AS
+BEGIN
+	SET NOCOUNT ON;
+	
+	SELECT 
+	     ID,GuID,Name,ShortName,convert(BIGINT,Version)Version,Deleted, ZoneGuID
+	FROM
+	       restaurant.Section
+       
+END
+GO
+PRINT 'Created or altered SP Section_GetAll.';
+GO
+
 -- SP: GetCustomerLoyaltyPoints (only in File 2 — converted to CREATE OR ALTER)
 CREATE OR ALTER PROCEDURE [dbo].[GetCustomerLoyaltyPoints]
     @CustomerID UNIQUEIDENTIFIER,
@@ -10563,49 +10618,85 @@ GO
 -- Any menu customization specific to the target DB that isn't also in
 -- defaultDB will be lost — review before running against any database
 -- with known local menu customizations.
+--
+-- CRITICAL GUARD (added 2026-08-17, after a real incident): this section
+-- must NEVER run while connected to defaultDB itself. Since the DELETE
+-- and the subsequent INSERT...SELECT FROM [defaultDB].[restaurant].[WebMenu]
+-- are separate GO-batches (each commits independently, no shared
+-- transaction), running this while connected TO defaultDB deletes
+-- defaultDB's own WebMenu rows and then tries to copy them back FROM
+-- the very table that was just emptied — netting zero rows. This
+-- actually happened: a full-script replay against defaultDB (as part of
+-- routine idempotency verification, nothing WebMenu-specific) silently
+-- wiped defaultDB.restaurant.WebMenu to 0 rows, and every subsequent
+-- replay against any other target DB (testmeat, brtest, dtest1) then
+-- propagated that emptiness via this same section, breaking the live
+-- menu (WebMenu IDs are referenced by UserWebMenuPermission, so an
+-- empty WebMenu means no menu items render for anyone). Recovered by
+-- restoring all four from kashkan.restaurant.WebMenu (the one DB never
+-- touched by this script, still had the original 128 rows with the
+-- correct IDs). Root cause fixed below by skipping this entire section
+-- whenever DB_NAME() = 'defaultDB' — defaultDB is the *source* of this
+-- sync, never a valid target for it.
 PRINT 'Section R: Resyncing restaurant.WebMenu from defaultDB.restaurant.WebMenu...';
 GO
 
-SET IDENTITY_INSERT [restaurant].[WebMenu] ON;
+IF DB_NAME() = 'defaultDB'
+    PRINT 'Section R skipped: connected to defaultDB itself, which is the source of this sync, not a valid target.';
 GO
 
-DELETE FROM [restaurant].[WebMenu];
+IF DB_NAME() <> 'defaultDB'
+BEGIN
+    SET IDENTITY_INSERT [restaurant].[WebMenu] ON;
+END
 GO
 
-INSERT INTO [restaurant].[WebMenu]
-(
-    ID,
-    GuID,
-    Name,
-    ParentID,
-    Url,
-    Icon,
-    Class,
-    IsSubMenu,
-    SpanClass,
-    btnClass,
-    OnClick,
-    ControllerName,
-    IsActive
-)
-SELECT
-    ID,
-    GuID,
-    Name,
-    ParentID,
-    Url,
-    Icon,
-    Class,
-    IsSubMenu,
-    SpanClass,
-    btnClass,
-    OnClick,
-    ControllerName,
-    IsActive
-FROM [defaultDB].[restaurant].[WebMenu];
+IF DB_NAME() <> 'defaultDB'
+BEGIN
+    DELETE FROM [restaurant].[WebMenu];
+END
 GO
 
-SET IDENTITY_INSERT [restaurant].[WebMenu] OFF;
+IF DB_NAME() <> 'defaultDB'
+BEGIN
+    INSERT INTO [restaurant].[WebMenu]
+    (
+        ID,
+        GuID,
+        Name,
+        ParentID,
+        Url,
+        Icon,
+        Class,
+        IsSubMenu,
+        SpanClass,
+        btnClass,
+        OnClick,
+        ControllerName,
+        IsActive
+    )
+    SELECT
+        ID,
+        GuID,
+        Name,
+        ParentID,
+        Url,
+        Icon,
+        Class,
+        IsSubMenu,
+        SpanClass,
+        btnClass,
+        OnClick,
+        ControllerName,
+        IsActive
+    FROM [defaultDB].[restaurant].[WebMenu];
+END
+GO
+
+IF DB_NAME() <> 'defaultDB'
+BEGIN
+    SET IDENTITY_INSERT [restaurant].[WebMenu] OFF;
+END
 GO
 
 PRINT 'Section R complete.';
@@ -11537,15 +11628,28 @@ GO
 -- ============================================================
 -- Section Y - WebMenu entries for Consumption Report (2026-08-08)
 -- ============================================================
--- Registers the two Consumption Report screens (Section X's stored
--- procedures / LoungeWebAPI's ItemWiseConsumptionReport and
--- MenuItemConsumptionReport controller routes) in restaurant.WebMenu so
--- they appear in the Reports menu. Follows the existing Wastage Detail/
--- Wastage Summary placement pattern exactly: the per-item detail report
--- sits directly under REPORTS (ParentID=5, IsSubMenu=0), the flat
--- consolidated report sits under POS SUMMARY (ParentID=7, IsSubMenu=1).
--- ID is IDENTITY -- keyed by GuID for idempotency, same convention as
+-- Registers the Consumption Report screen (Section X's stored
+-- procedures / LoungeWebAPI's MenuItemConsumptionReport controller
+-- route) in restaurant.WebMenu so it appears in the Reports menu.
+-- Follows the existing Wastage Detail/Wastage Summary placement
+-- pattern: sits under POS SUMMARY (ParentID=7, IsSubMenu=1). ID is
+-- IDENTITY -- keyed by GuID for idempotency, same convention as
 -- Section A2's seed data.
+--
+-- Correction (2026-08-18): this section originally also inserted a
+-- SECOND, separate top-level entry "Item Wise Consumption Report"
+-- (GuID ...5A01, directly under REPORTS) alongside "Consumption
+-- Report" (GuID ...5A02, under POS SUMMARY). User feedback: these are
+-- redundant -- Consumption Report already covers it, and the
+-- top-level duplicate was confusing (kept reappearing at the bottom
+-- of the menu). Removed the insert for ...5A01 below and replaced it
+-- with an idempotent DELETE, so any database that already has it
+-- (from an earlier run of the old version of this section) gets it
+-- cleaned up too, not just newly-provisioned databases. defaultDB no
+-- longer has this row, so Section R/Z's resync-from-defaultDB already
+-- keeps every other database in line -- this DELETE only matters for
+-- catching a database that runs this full script directly without
+-- going through Section R first.
 PRINT 'Section Y: WebMenu entries for Consumption Report...';
 GO
 
@@ -11557,15 +11661,14 @@ BEGIN
     DECLARE @ReportsMenuID INT = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name = 'REPORTS' AND ParentID = 0);
     DECLARE @PosSummaryMenuID INT = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name = 'POS SUMMARY' AND ParentID = @ReportsMenuID);
 
-    IF @ReportsMenuID IS NOT NULL AND NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A01')
-        INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, Class, IsSubMenu, SpanClass, btnClass, OnClick, ControllerName, IsActive)
-        VALUES ('7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A01', 'Item Wise Consumption Report', @ReportsMenuID, '/Reports/ItemWiseConsumptionReport/Index', 'PlusCircle', NULL, 0, NULL, NULL, NULL, 'ItemWiseConsumptionReport', 1);
+    DELETE FROM restaurant.UserWebMenuPermission WHERE MenuID = (SELECT ID FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A01');
+    DELETE FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A01';
 
     IF @PosSummaryMenuID IS NOT NULL AND NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = '7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02')
         INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, Class, IsSubMenu, SpanClass, btnClass, OnClick, ControllerName, IsActive)
         VALUES ('7F3E9A2C-4B1D-4E6F-9A8B-6C2D3E4F5A02', 'Menu Item Consumption Report', @PosSummaryMenuID, '/Reports/MenuItemConsumptionReport/Index', 'PlusCircle', NULL, 1, NULL, NULL, NULL, 'MenuItemConsumptionReport', 1);
 
-    PRINT 'Inserted Consumption Report WebMenu entries successfully.';
+    PRINT 'Inserted Consumption Report WebMenu entry successfully (Item Wise Consumption Report duplicate removed if present).';
 END
 ELSE
 BEGIN
@@ -13282,6 +13385,16 @@ GO
 -- Report_ItemWiseSalesreport / Report_ItemWiseSalesreportPaging).
 -- No React/WinForms UI in this round - contract documented for the
 -- frontend handover doc; this is the WebAPI-facing backend only.
+--
+-- Addendum: wires R_VoidLog into the local-to-cloud sync pipeline
+-- (found during testing: void reasons saved correctly locally but
+-- never reached the Web DB, unlike ComplimentaryReason/CancelReason
+-- which ride along on R_SalesMaster's own Sale UDT sync). Mirrors the
+-- same GetAll/Insert pattern already used for every other synced
+-- entity (e.g. Sync_StockOver_GetAll/Sync_StockOver_Insert): a Version
+-- (rowversion) column drives "since last sync" incremental pulls on
+-- the local side, a MERGE-based Insert proc idempotently upserts by
+-- GuID on the cloud side.
 -- ============================================================
 
 CREATE OR ALTER PROCEDURE [restaurant].[Report_VoidLog]
@@ -13418,6 +13531,94 @@ BEGIN
 END
 GO
 PRINT 'Created or altered SP Report_VoidLogPaging.';
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_VoidLog') AND name = 'Version')
+BEGIN
+    ALTER TABLE dbo.R_VoidLog ADD Version ROWVERSION;
+    PRINT 'Added column Version to dbo.R_VoidLog successfully.';
+END
+ELSE
+    PRINT 'Column Version already exists on dbo.R_VoidLog.';
+GO
+
+IF EXISTS (SELECT 1 FROM sys.table_types WHERE name = 'VoidLog_UDT' AND schema_id = SCHEMA_ID('restaurant'))
+    DROP TYPE [restaurant].[VoidLog_UDT];
+GO
+
+CREATE TYPE [restaurant].[VoidLog_UDT] AS TABLE (
+    [GuID]             uniqueidentifier NOT NULL,
+    [MasterID]         uniqueidentifier NULL,
+    [BillNo]           varchar(50)      NULL,
+    [SectionID]        uniqueidentifier NULL,
+    [CounterID]        uniqueidentifier NULL,
+    [BranchID]         uniqueidentifier NULL,
+    [ProductID]        uniqueidentifier NULL,
+    [ProductName]      varchar(200)     NULL,
+    [Quantity]         decimal(18,3)    NULL,
+    [UnitRate]         money            NULL,
+    [Reason]           varchar(250)     NULL,
+    [VoidedByUserID]   uniqueidentifier NULL,
+    [VoidedByUserName] varchar(100)     NULL,
+    [VoidedDate]       datetime         NOT NULL,
+    [CompanyID]        int              NULL,
+    [FinancialYearID]  decimal(18,0)    NULL
+);
+GO
+PRINT 'Created restaurant.VoidLog_UDT.';
+GO
+
+-- Local-side pull: run against the WinForms DB, feeds Server.Sync's VoidLogSyncHandler.GetAll().
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_VoidLog_GetAll]
+    @Version BIGINT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT GuID, MasterID, BillNo, SectionID, CounterID, BranchID, ProductID, ProductName, Quantity, UnitRate, Reason,
+           VoidedByUserID, VoidedByUserName, VoidedDate, CompanyID, FinancialYearID, CONVERT(BIGINT, Version) AS [Version]
+    FROM dbo.R_VoidLog
+    WHERE CONVERT(BIGINT, Version) > @Version
+    ORDER BY Version;
+    SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Sync_VoidLog_GetAll.';
+GO
+
+-- Cloud-side push: run against the Web DB, called by SaleDataAccess.Upload(List<VoidLog>) via Api/Sale/VoidLog/Sync/Upload.
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_VoidLog_Insert]
+    @UDT_VoidLog [restaurant].[VoidLog_UDT] READONLY
+AS
+BEGIN
+    SET NOCOUNT ON;
+    MERGE dbo.[R_VoidLog] AS trg
+    USING @UDT_VoidLog AS s
+    ON s.GuID = trg.GuID
+    WHEN MATCHED THEN UPDATE SET
+        trg.MasterID = s.MasterID,
+        trg.BillNo = s.BillNo,
+        trg.SectionID = s.SectionID,
+        trg.CounterID = s.CounterID,
+        trg.BranchID = s.BranchID,
+        trg.ProductID = s.ProductID,
+        trg.ProductName = s.ProductName,
+        trg.Quantity = s.Quantity,
+        trg.UnitRate = s.UnitRate,
+        trg.Reason = s.Reason,
+        trg.VoidedByUserID = s.VoidedByUserID,
+        trg.VoidedByUserName = s.VoidedByUserName,
+        trg.VoidedDate = s.VoidedDate,
+        trg.CompanyID = s.CompanyID,
+        trg.FinancialYearID = s.FinancialYearID
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (GuID, MasterID, BillNo, SectionID, CounterID, BranchID, ProductID, ProductName, Quantity, UnitRate, Reason,
+                VoidedByUserID, VoidedByUserName, VoidedDate, CompanyID, FinancialYearID)
+        VALUES (s.GuID, s.MasterID, s.BillNo, s.SectionID, s.CounterID, s.BranchID, s.ProductID, s.ProductName, s.Quantity, s.UnitRate, s.Reason,
+                s.VoidedByUserID, s.VoidedByUserName, s.VoidedDate, s.CompanyID, s.FinancialYearID);
+    SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Sync_VoidLog_Insert.';
 GO
 
 PRINT 'Section AB complete.';
