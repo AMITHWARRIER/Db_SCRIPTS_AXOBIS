@@ -566,6 +566,29 @@ BEGIN
 END
 GO
 
+-- Heal R_Category.CategoryMasterGuID from restaurant.CategoryLocationMapping.
+-- The Category-master link is stored in BOTH R_Category (global, read by the sales/profit/summary
+-- reports) and CategoryLocationMapping (per-branch, read by the Category master UI). On any DB where
+-- categories existed before R_Category.CategoryMasterGuID was added, the base column stays NULL while
+-- the mapping already carries the link, so Category/Group-wise and Item-Summary reports come back blank
+-- even though the UI shows the category as grouped. Idempotent: only fills rows still NULL, from an
+-- active mapping that actually has a master.
+IF OBJECT_ID('dbo.R_Category','U') IS NOT NULL AND OBJECT_ID('restaurant.CategoryLocationMapping','U') IS NOT NULL
+BEGIN
+    UPDATE C
+        SET C.CategoryMasterGuID = X.CategoryMasterGuID
+    FROM dbo.R_Category C
+    CROSS APPLY (
+        SELECT TOP 1 CLM.CategoryMasterGuID
+        FROM restaurant.CategoryLocationMapping CLM
+        WHERE CLM.CategoryID = C.GuID AND CLM.CategoryMasterGuID IS NOT NULL
+        ORDER BY CLM.IsActive DESC, CLM.UpdatedDate DESC
+    ) X
+    WHERE C.CategoryMasterGuID IS NULL;
+    PRINT 'Backfilled R_Category.CategoryMasterGuID from CategoryLocationMapping where missing.';
+END
+GO
+
 -- dbo.R_SalesMaster
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesMaster]') AND type = 'U')
 BEGIN
@@ -3372,7 +3395,7 @@ BEGIN
 			INNER JOIN R_SalesMaster SM ON BR.[GuID]=SM.BranchID AND SM.BranchID=@BranchID
 			INNER JOIN R_SalesDetail SD ON SD.[MasterID]=SM.[GuID] AND PPD.MasterID=SD.ProductID
 			INNER JOIN R_Category CP ON CP.[GuID]=PPD.CategoryID
-			INNER JOIN restaurant.CategoryMaster CM ON CM.GuID=CP.CategoryMasterGuID
+			LEFT OUTER JOIN restaurant.CategoryMaster CM ON CM.GuID=CP.CategoryMasterGuID
 			LEFT OUTER JOIN R_GroupEntry GE ON GE.[Guid]=PPD.GroupID
 			LEFT OUTER JOIN restaurant.Section S ON SM.SectionID=S.[GuID]
 			LEFT OUTER JOIN restaurant.ZoneMaster Z ON S.ZoneGuid=Z.[GuID]
@@ -3397,7 +3420,7 @@ BEGIN
 			INNER JOIN R_SalesTempMaster SM ON BR.[GuID]=SM.BranchID
 			INNER JOIN R_SalesTempDetail SD ON SD.[MasterID]=SM.[GuID] AND PPD.MasterID=SD.ProductID
 			INNER JOIN R_Category CP ON CP.[GuID]=PPD.CategoryID
-			INNER JOIN restaurant.CategoryMaster CM ON CM.GuID=CP.CategoryMasterGuID
+			LEFT OUTER JOIN restaurant.CategoryMaster CM ON CM.GuID=CP.CategoryMasterGuID
 			LEFT OUTER JOIN R_GroupEntry GE ON GE.[Guid]=PPD.GroupID
 			LEFT OUTER JOIN restaurant.Section S ON SM.SectionID=S.[GuID]
 			LEFT OUTER JOIN restaurant.ZoneMaster Z ON S.ZoneGuid=Z.[GuID]
@@ -3681,6 +3704,202 @@ BEGIN
 END
 GO
 PRINT 'Created or altered SP Report_CustomerCreditDetailsPaging.';
+GO
+
+-- SP: Report_CustomerCreditDetails (drift-fix: existed on customer DBs but was missing from this script; serves CustomerCreditReport/GetAll)
+CREATE OR ALTER PROCEDURE [restaurant].[Report_CustomerCreditDetails]
+ @FromDate       DATETIME	      = NULL,
+ @ToDate         DATETIME	      = NULL,
+ @CustomerId     uniqueidentifier = NULL
+AS
+BEGIN
+	DECLARE
+	@R_FromDate       DATETIME	       = @FromDate,
+	@R_ToDate         DATETIME	       = @ToDate,
+	@R_CustomerId     uniqueidentifier = @CustomerId
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+	SET NOCOUNT ON
+
+	SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	SELECT CCD.Date,BillNo,RefNo,Amount,CM.Name as Customer
+	FROM R_CustomerCreditDetail CCD
+	LEFT  OUTER JOIN R_Customer CM ON CM.[GuID] = CCD.CustomerID
+	WHERE CustomerID=@R_CustomerId OR @R_CustomerId IS NULL
+	AND (CCD.Date>=@R_FromDate OR @R_FromDate IS NULL)
+	AND (CCD.Date<@R_ToDate OR @R_ToDate IS NULL)
+	AND Module = 'Sales'
+	ORDER BY CCD.Date,cast(CCD.BillNo AS INT)
+
+	SET NOCOUNT OFF
+END
+GO
+PRINT 'Created or altered SP Report_CustomerCreditDetails.';
+GO
+
+-- SP: Report_CustomerCreditRepaymentDetails (drift-fix: missing from this script; serves CustomerCreditRepaymentReport/GetAll)
+CREATE OR ALTER PROCEDURE [restaurant].[Report_CustomerCreditRepaymentDetails](
+	@FromDate		DATETIME			= NULL,
+	@ToDate			DATETIME			= NULL,
+	@CustomerId     UNIQUEIDENTIFIER	= NULL
+)
+AS
+BEGIN
+	DECLARE
+	@R_FromDate		   DATETIME			= @FromDate,
+	@R_ToDate		   DATETIME			= @ToDate,
+	@R_CustomerId      UNIQUEIDENTIFIER	= @CustomerId
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+
+	SET NOCOUNT ON
+	SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	SELECT CCR.Date,S.Date [BillDate],CCD.BillNo,CCD.RefNo,C.Name Customer,CCD.Amount
+	FROM R_CustomerCreditRepayment CCR
+	INNER JOIN R_CustomerCreditDetail CCD on CCD.MasterID=CCR.GuID
+	INNER JOIN R_Customer C on C.GuID=CCD.CustomerID
+	INNER JOIN (SELECT GuID,Date from R_SalesMaster UNION SELECT GuID,Date FROM R_SalesTempMaster) S ON S.GuID=CCD.BillID
+	WHERE CCD.Type='Debit' AND Module='SalesRepayment' AND CustomerID=@R_CustomerId OR @R_CustomerId IS NULL
+	AND (CCR.Date>=@R_FromDate OR @R_FromDate IS NULL) AND (CCR.Date<@R_ToDate OR @R_ToDate IS NULL)  ORDER BY CCR.Date,cast(CCD.BillNo AS INT)
+
+	SET NOCOUNT OFF
+END
+GO
+PRINT 'Created or altered SP Report_CustomerCreditRepaymentDetails.';
+GO
+
+-- SP: Report_CustomerCreditRepaymentDetailsPaging (drift-fix: missing from this script; serves CustomerCreditRepaymentReport/GetAllLazyPagedData — the Customer Repayment report)
+CREATE OR ALTER PROCEDURE [restaurant].[Report_CustomerCreditRepaymentDetailsPaging]
+(
+	@FromDate		  DATE      		= NULL,
+	@ToDate			  DATE      		= NULL,
+	@CustomerId       UNIQUEIDENTIFIER	= NULL,
+    @PageNumber		  INT               = NULL,
+    @PageSize	      INT               = NULL,
+    @SortingColumn	  VARCHAR(MAX)      = NULL,
+    @SortingDirection VARCHAR(MAX)      = NULL,
+ @BranchID				 VARCHAR(MAX) = NULL
+)
+AS
+BEGIN
+	DECLARE
+	@R_FromDate		    DATE     			= @FromDate,
+	@R_ToDate		    DATE    			= @ToDate,
+	@R_CustomerId       UNIQUEIDENTIFIER	= @CustomerId,
+    @R_PageNumber	    INT				    = @PageNumber,
+    @R_PageSize		    INT				    = @PageSize,
+    @R_SortingColumn    VARCHAR(MAX)        = @SortingColumn,
+    @R_SortingDirection VARCHAR(MAX)        = @SortingDirection,
+		 @R_BranchID        VARCHAR(MAX)		 = @BranchID
+
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+
+	SET NOCOUNT ON
+	SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+	 IF Object_id('TempDB.dbo.#CustomerCreditRepaymentDetails') IS NOT NULL
+	BEGIN
+		DROP TABLE #CustomerCreditRepaymentDetails
+	END
+		IF Object_id('TempDB.dbo.#CustomerCreditRepaymentDetailsCount') IS NOT NULL
+	BEGIN
+		DROP TABLE #CustomerCreditRepaymentDetailsCount
+	END
+
+	------BEGIN SELECT FOR Customer Credit Repayment Details REPORT-----
+		SELECT *
+		INTO #CustomerCreditRepaymentDetails
+		FROM
+			(
+				SELECT CCR.Date,S.Date [BillDate],CCD.BillNo,CCD.RefNo,C.Name Customer,CCD.Amount ,  CAST(SUBSTRING(billno, PATINDEX('%[0-9]%', BillNo), LEN(BillNo)) AS INT) AS [No]
+				FROM R_CustomerCreditRepayment CCR
+				INNER JOIN R_CustomerCreditDetail CCD on CCD.MasterID=CCR.GuID
+				INNER JOIN R_Customer C on C.GuID=CCD.CustomerID
+				INNER JOIN (SELECT GuID,Date from R_SalesMaster UNION SELECT GuID,Date FROM R_SalesTempMaster) S ON S.GuID=CCD.BillID
+				WHERE CCD.Type='Debit' AND Module='SalesRepayment' AND CustomerID=@R_CustomerId OR @R_CustomerId IS NULL
+				AND (CCR.Date>=@R_FromDate OR @R_FromDate IS NULL) AND (CCR.Date<@R_ToDate OR @R_ToDate IS NULL) AND(CCR.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+			) AS CustomerCreditRepaymentDetails
+
+	SELECT COUNT(*) AS CustomerCreditRepaymentDetailsCount
+		INTO #CustomerCreditRepaymentDetailsCount
+		FROM #CustomerCreditRepaymentDetails
+
+	IF @R_PageSize = -1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT CustomerCreditRepaymentDetailsCount FROM #CustomerCreditRepaymentDetailsCount)[RowCount]
+					FROM #CustomerCreditRepaymentDetails
+					ORDER BY [Date] '+ @R_SortingDirection+''
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT CustomerCreditRepaymentDetailsCount FROM #CustomerCreditRepaymentDetailsCount)[RowCount] ,Date as Date1
+					FROM #CustomerCreditRepaymentDetails
+					ORDER BY  ' + @R_SortingColumn +' '+ @R_SortingDirection+',[Date1] asc'
+				EXEC (@SortingCmd)
+			END
+		END
+
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT CustomerCreditRepaymentDetailsCount FROM #CustomerCreditRepaymentDetailsCount)[RowCount]
+					FROM #CustomerCreditRepaymentDetails
+					ORDER BY [Date] '+ @R_SortingDirection+'
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT CustomerCreditRepaymentDetailsCount FROM #CustomerCreditRepaymentDetailsCount)[RowCount] ,Date as Date1
+					FROM #CustomerCreditRepaymentDetails
+					ORDER BY  ' + @R_SortingColumn +' '+ @R_SortingDirection+',[Date1] asc
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+		END
+	END
+
+	------ FOR GETTING FOOTER TOTAL---------------------
+		SELECT  ''AS Date,
+		        ''AS[BillDate],
+				''AS BillNo,
+				''AS RefNo,
+				''AS Customer,
+				SUM(Amount)Amount
+		FROM #CustomerCreditRepaymentDetails
+
+	------END OF DETAIL SECTION-----
+
+	IF Object_id('TempDB.dbo.#CustomerCreditRepaymentDetails') IS NOT NULL
+	BEGIN
+		DROP TABLE #CustomerCreditRepaymentDetails
+	END
+
+	IF Object_id('TempDB.dbo.#CustomerCreditRepaymentDetailsCount') IS NOT NULL
+	BEGIN
+		DROP TABLE #CustomerCreditRepaymentDetailsCount
+	END
+
+
+ SET NOCOUNT OFF
+END
+GO
+PRINT 'Created or altered SP Report_CustomerCreditRepaymentDetailsPaging.';
 GO
 
 -- SP: Report_TimeBasedSalesDetailPaging (File 2 only)
