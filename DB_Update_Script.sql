@@ -238,10 +238,21 @@ IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_Cust
 GO
 
 -- dbo.R_EinvoiceStatus
-IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_EinvoiceStatus') AND name = 'Version')
-    ALTER TABLE dbo.R_EinvoiceStatus ADD Version bigint NULL;
-IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_EinvoiceStatus') AND name = 'CreatedDate')
-    ALTER TABLE dbo.R_EinvoiceStatus ADD CreatedDate datetime NULL DEFAULT (getdate());
+-- Table-existence guard added 2026-08-26: the column checks below use
+-- OBJECT_ID('dbo.R_EinvoiceStatus'), which returns NULL when the TABLE does
+-- not exist yet -- so NOT EXISTS was true and the ALTER fired anyway, failing
+-- with Msg 4902 on any database that reaches this point before the table is
+-- created further down in Section C. Harmless with plain sqlcmd (the script
+-- carries on and the later CREATE TABLE includes both columns), but fatal
+-- when run with -b, which aborts the whole update on first error. Matches the
+-- guard style already used immediately below.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_EinvoiceStatus]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_EinvoiceStatus') AND name = 'Version')
+        ALTER TABLE dbo.R_EinvoiceStatus ADD Version bigint NULL;
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_EinvoiceStatus') AND name = 'CreatedDate')
+        ALTER TABLE dbo.R_EinvoiceStatus ADD CreatedDate datetime NULL DEFAULT (getdate());
+END
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_EinvoiceStatus]') AND type = 'U')
 BEGIN
     ALTER TABLE dbo.R_EinvoiceStatus ALTER COLUMN GuID varchar(50) NOT NULL;
@@ -708,45 +719,12 @@ BEGIN
 END
 GO
 
--- restaurant.Sync_Sales_GetAll (Windows-side sync source proc read by Axobis.Restaurant.Server.Sync's
--- SalesSyncHandler.GetAllSales — must select OrderType or the C# row["OrderType"] mapping throws and
--- breaks the whole sales upload batch for this customer)
-CREATE OR ALTER PROCEDURE [restaurant].[Sync_Sales_GetAll]
-	@Version BIGINT = NULL
-AS
-
-    SET NOCOUNT ON
-
-	SELECT SM.ID,SM.[GuID],[No],[Date],SectionID,CounterID,BillTime,CustomerID,Total,RTotal,Tax,Cash,[Card],[CardNo],
-	FxPaid,FxTypeID,FxRate,FxAmount,CustomerCredit,Discount,DiscountPercentage,RoundOff,FinancialYearID,
-	UserID,CreatedBy,Remarks,CompanyID,LastUpdate,BranchID,Deleted,Refund,TransactionDate,IsPending,
-	BillTypeID,Cancelled,WaiterID,ProdDiscount,CustomerGSTNo,BillNo,SeriesType,TableID,CancelReason,
-	TokenNo,IsDespatched,IsSettled,DeliveryDate,DeliveryTime,DeliveryRemarks,IsShiftClosed,ShiftNumber,
-	TabID,Merged,Pax,Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
-	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
-	TabOrderNo,convert(BIGINT,Version)[Version],UpdatedUser
-	,SD.[GuID] AS DeliveryID, OrderType, OrderOpenedDateTime, OrderClosedDateTime
-	FROM [R_SalesMaster] SM
-	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
-	WHERE [Version] > @Version
-
-	SELECT *  FROM [R_SalesDetail]
-
-	SELECT [GuID],MasterID,[Type],[Amount],CardNo,CardTypeID,FxTypeID,FxPaid,FxRate,[CustomerID],deleted,Cancelled
-	FROM [dbo].[R_SalesPaymentDetail]
-
-	SELECT * FROM R_SalesProductModifierDetail
-
-	SELECT * FROM [R_SalesComboDetail]
-
-	SELECT * FROM [R_SalesDelivery]
-
-	SELECT * FROM [R_MiscellaneousSalesAmount]
-
-	SET NOCOUNT OFF
-GO
-PRINT 'Created or altered restaurant.Sync_Sales_GetAll (added OrderType to SELECT list).';
-GO
+-- The early Sync_Sales_GetAll definition that stood here was REMOVED
+-- (2026-09-04, Tacos support case): a newer definition later in this
+-- script (the one carrying ComplimentaryReason and the 7b return
+-- columns) always overwrote it, so this copy only created drift risk.
+-- One proc, one definition -- the surviving one is near the
+-- Sync_SalesTemp_GetAll batched definition's later fix block.
 
 -- restaurant.Product
 IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[Product]') AND type = 'U')
@@ -6010,10 +5988,38 @@ GO
 PRINT 'Section I: Combo Intelligence setup...';
 GO
 
--- I1: Create R_ComboIntelligence table
-IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'R_ComboIntelligence')
+-- I0: Heal schema drift (found on the meatpoint customer copy, testmeat2,
+-- 2026-09-05). A prior run executed under the per-database admin login
+-- created these two objects under THAT login's default schema (e.g.
+-- testmeat2_admin.R_ComboIntelligence) because everything here was
+-- unqualified. The old existence check was schema-agnostic, so it then
+-- skipped creation while the dbo-resolved references below failed with
+-- Msg 208. Transfer any drifted table to dbo (data preserved), drop any
+-- drifted proc (recreated in dbo just below), and qualify everything.
+DECLARE @driftSch sysname, @driftSql nvarchar(400);
+SELECT @driftSch = s.name FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.name = 'R_ComboIntelligence' AND s.name <> 'dbo';
+IF @driftSch IS NOT NULL
 BEGIN
-    CREATE TABLE R_ComboIntelligence (
+    SET @driftSql = N'ALTER SCHEMA dbo TRANSFER ' + QUOTENAME(@driftSch) + N'.R_ComboIntelligence;';
+    EXEC (@driftSql);
+    PRINT 'I0: moved R_ComboIntelligence from schema ' + @driftSch + ' to dbo (data kept).';
+END
+SET @driftSch = NULL;
+SELECT @driftSch = s.name FROM sys.procedures p JOIN sys.schemas s ON s.schema_id = p.schema_id
+WHERE p.name = 'usp_ComputeComboIntelligence' AND s.name <> 'dbo';
+IF @driftSch IS NOT NULL
+BEGIN
+    SET @driftSql = N'DROP PROCEDURE ' + QUOTENAME(@driftSch) + N'.usp_ComputeComboIntelligence;';
+    EXEC (@driftSql);
+    PRINT 'I0: dropped drifted ' + @driftSch + '.usp_ComputeComboIntelligence (recreated in dbo below).';
+END
+GO
+
+-- I1: Create R_ComboIntelligence table
+IF OBJECT_ID('dbo.R_ComboIntelligence', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.R_ComboIntelligence (
         ID              INT IDENTITY(1,1) PRIMARY KEY,
         ProductID       UNIQUEIDENTIFIER NOT NULL,
         SuggestedID     UNIQUEIDENTIFIER NOT NULL,
@@ -6031,7 +6037,7 @@ BEGIN
     );
 
     CREATE INDEX IX_ComboIntel_Lookup
-        ON R_ComboIntelligence (ProductID, TimeSlot, Confidence DESC);
+        ON dbo.R_ComboIntelligence (ProductID, TimeSlot, Confidence DESC);
 
     PRINT 'R_ComboIntelligence table created.';
 END
@@ -6040,11 +6046,11 @@ ELSE
 GO
 
 -- I2: Create usp_ComputeComboIntelligence stored procedure
-IF OBJECT_ID('usp_ComputeComboIntelligence', 'P') IS NOT NULL
-    DROP PROCEDURE usp_ComputeComboIntelligence;
+IF OBJECT_ID('dbo.usp_ComputeComboIntelligence', 'P') IS NOT NULL
+    DROP PROCEDURE dbo.usp_ComputeComboIntelligence;
 GO
 
-CREATE PROCEDURE usp_ComputeComboIntelligence
+CREATE PROCEDURE dbo.usp_ComputeComboIntelligence
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -6062,7 +6068,7 @@ BEGIN
     END
 
     -- Purge suggestions where either product has since been deleted
-    DELETE FROM R_ComboIntelligence
+    DELETE FROM dbo.R_ComboIntelligence
     WHERE ProductID   NOT IN (SELECT GuID FROM R_Product WHERE Deleted <> 1)
        OR SuggestedID NOT IN (SELECT GuID FROM R_Product WHERE Deleted <> 1);
 
@@ -6135,7 +6141,7 @@ BEGIN
         WHERE B.BaseCount >= 20
     )
 
-    MERGE R_ComboIntelligence AS Target
+    MERGE dbo.R_ComboIntelligence AS Target
     USING (
         SELECT ProductID, SuggestedID, TimeSlot, CoCount, BaseCount, Confidence
         FROM AllPairs
@@ -6162,9 +6168,9 @@ END;
 GO
 
 -- I3: Populate initial data (skip if table already has rows from a prior run)
-IF NOT EXISTS (SELECT 1 FROM R_ComboIntelligence)
+IF NOT EXISTS (SELECT 1 FROM dbo.R_ComboIntelligence)
 BEGIN
-    EXEC usp_ComputeComboIntelligence;
+    EXEC dbo.usp_ComputeComboIntelligence;
     PRINT 'Initial combo intelligence data populated.';
 END
 ELSE
@@ -7759,8 +7765,7 @@ WITH StockAdjustments AS (
     INNER JOIN restaurant.Inv_StcokAdjustmentMaster SAM 
         ON SAD.MasterID = SAM.GUID
     WHERE SAM.Deleted = 0
-        AND (@R_FromDate IS NULL OR SAM.Date >= @R_FromDate)
-        AND (@R_ToDate IS NULL OR SAM.Date < @R_ToDate)
+              AND (@R_ToDate IS NULL OR SAM.Date < @R_ToDate)
 ),
 -- CTE: Production
 ProductionData AS (
@@ -7773,8 +7778,7 @@ ProductionData AS (
     INNER JOIN restaurant.Inv_ProductionMaster PRM 
         ON PRD.MasterID = PRM.GUID
     WHERE PRM.Deleted = 0
-        AND (@R_FromDate IS NULL OR PRM.Date >= @R_FromDate)
-        AND (@R_ToDate IS NULL OR PRM.Date < @R_ToDate)
+              AND (@R_ToDate IS NULL OR PRM.Date < @R_ToDate)
 ),
 -- CTE: POS Sales
 PosSales AS (
@@ -7818,8 +7822,7 @@ StockTransfers AS (
         ON STDTO.MasterID = STM.GUID
     WHERE STM.Deleted = 0 
         AND STDTO.FromBranch = STM.BranchID
-        AND (@R_FromDate IS NULL OR STM.Date >= @R_FromDate)
-        AND (@R_ToDate IS NULL OR STM.Date < @R_ToDate)
+              AND (@R_ToDate IS NULL OR STM.Date < @R_ToDate)
 )
 
 -- Final Query
@@ -7970,6 +7973,16 @@ GO
 -- Create date: <Create Date,,>
 -- Description:	<Description,,>
 -- =============================================
+-- 2026-09-22 WAC fixes (QA "Stock Value Report wrong avg cost/stock value"):
+-- 1) The ledger is now ALWAYS built from the very first transaction up to
+--    @ToDate ("As On" date). @FromDate is kept for API compatibility but no
+--    longer truncates the ledger start — a mid-range FromDate made every
+--    product look like it started that day at zero stock with no carry-forward.
+-- 2) Negative-stock WAC policy (negative sales cannot be blocked):
+--    outflows are always costed at the LAST known WAC; while stock is zero or
+--    negative the stock value is treated as zero; when new stock arrives while
+--    stock is <= 0, the inflow price becomes the new WAC (the negative qty is
+--    treated as zero-stock for WAC, so old distorted values can't pollute it).
 CREATE OR ALTER PROCEDURE [restaurant].[Report_StockValuePaging]
 (
 	 @IsDayClosed           INT			    = NULL,
@@ -8055,8 +8068,7 @@ SELECT
     OPD.Quantity * ISNULL(OPD.UnitPrice, 0)
 FROM dbo.OpeningStockMaster OPM
 JOIN dbo.OpeningStockDetail OPD ON OPD.MasterID = OPM.GUID
-WHERE (@R_FromDate IS NULL OR OPM.Date >= @R_FromDate)
-  AND (@R_ToDate IS NULL OR OPM.Date < @R_ToDate)
+WHERE (@R_ToDate IS NULL OR OPM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR OPM.BranchID = @R_BranchID);
 
 -- Purchase
@@ -8082,7 +8094,6 @@ WHERE PR.Deleted = 0
   --AND PR.TransType NOT IN ('PR', 'PO', 'GR')
   --AND PR.ReferenceType = 0
   AND PR.TransTypeID = 2
-  AND (@R_FromDate IS NULL OR PR.EntryDate >= @R_FromDate)
   AND (@R_ToDate IS NULL OR PR.EntryDate < @R_ToDate)
   AND (@R_BranchID IS NULL OR PR.BranchID = @R_BranchID);
 
@@ -8098,7 +8109,6 @@ SELECT
     PRM.Quantity * ISNULL(PRM.Cost, 0)
 FROM restaurant.Inv_ProductionMaster PRM
 WHERE PRM.Deleted = 0
-  AND (@R_FromDate IS NULL OR PRM.Date >= @R_FromDate)
   AND (@R_ToDate IS NULL OR PRM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR PRM.BranchID = @R_BranchID);
 
@@ -8115,7 +8125,6 @@ SELECT
 FROM restaurant.Inv_StcokTransferMaster STM
 JOIN restaurant.Inv_StcokTransferDetail STDTO ON STDTO.MasterID = STM.GUID
 WHERE STM.Deleted = 0
-  AND (@R_FromDate IS NULL OR STM.Date >= @R_FromDate)
   AND (@R_ToDate IS NULL OR STM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR STM.BranchID = @R_BranchID);
 
@@ -8132,7 +8141,6 @@ SELECT
 FROM restaurant.Inv_StcokAdjustmentMaster SAM
 JOIN restaurant.Inv_StcokAdjustmentDetail SAD ON SAD.MasterID = SAM.GUID
 WHERE SAM.Deleted = 0 AND SAD.AdjQuantity > 0
-  AND (@R_FromDate IS NULL OR SAM.Date >= @R_FromDate)
   AND (@R_ToDate IS NULL OR SAM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR SAM.BranchID = @R_BranchID);
 
@@ -8148,7 +8156,6 @@ SELECT
 FROM restaurant.Inv_SalesMaster SM
 JOIN restaurant.Inv_SalesDetail SD ON SD.MasterID = SM.GUID
 WHERE SM.Deleted = 0 AND SM.TransType NOT IN ('SR', 'SQ')
-  AND (@R_FromDate IS NULL OR SM.INVDATE >= @R_FromDate)
   AND (@R_ToDate IS NULL OR SM.INVDATE < @R_ToDate)
   AND (@R_BranchID IS NULL OR SM.BranchID = @R_BranchID);
 
@@ -8163,7 +8170,6 @@ SELECT
 FROM restaurant.Inv_ProductionMaster PRM
 JOIN restaurant.Inv_ProductionDetail PRD ON PRD.MasterID = PRM.GUID
 WHERE PRM.Deleted = 0
-  AND (@R_FromDate IS NULL OR PRM.Date >= @R_FromDate)
   AND (@R_ToDate IS NULL OR PRM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR PRM.BranchID = @R_BranchID);
 
@@ -8178,7 +8184,6 @@ SELECT
 FROM restaurant.Inv_StcokTransferMaster STM
 JOIN restaurant.Inv_StcokTransferDetail STDTO ON STDTO.MasterID = STM.GUID
 WHERE STM.Deleted = 0
-  AND (@R_FromDate IS NULL OR STM.Date >= @R_FromDate)
   AND (@R_ToDate IS NULL OR STM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR STM.BranchID = @R_BranchID);
 
@@ -8195,7 +8200,6 @@ SELECT
 FROM restaurant.Inv_StcokAdjustmentMaster SAM
 JOIN restaurant.Inv_StcokAdjustmentDetail SAD ON SAD.MasterID = SAM.GUID
 WHERE SAM.Deleted = 0 AND SAD.AdjQuantity < 0
-  AND (@R_FromDate IS NULL OR SAM.Date >= @R_FromDate)
   AND (@R_ToDate IS NULL OR SAM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR SAM.BranchID = @R_BranchID);
 
@@ -8229,13 +8233,34 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        SET @RQ = @RQ + ISNULL(@InQty, 0) - ISNULL(@OutQty, 0);
-        SET @RV = @RV + ISNULL(@InQty, 0) * ISNULL(@Rate, 0) - ISNULL(@OutQty, 0) * ISNULL(@WAC, 0);
-        --SET @WAC = CASE WHEN @RQ = 0 THEN 0 ELSE @RV / NULLIF(@RQ, 0) END;
-		IF @RQ > 0
-			SET @WAC = @RV / NULLIF(@RQ, 0);
--- else: keep previous @WAC unchanged
-
+        IF ISNULL(@InQty, 0) > 0
+        BEGIN
+            IF @RQ <= 0
+            BEGIN
+                -- Stock is zero/negative: treat it as zero for WAC, so this
+                -- inflow's price becomes the new WAC (an unpriced inflow such
+                -- as a transfer keeps the last WAC instead of zeroing it).
+                IF ISNULL(@Rate, 0) > 0
+                    SET @WAC = @Rate;
+                SET @RQ = @RQ + @InQty;
+                SET @RV = CASE WHEN @RQ > 0 THEN @RQ * @WAC ELSE 0 END;
+            END
+            ELSE
+            BEGIN
+                SET @RV = @RV + @InQty * ISNULL(@Rate, 0);
+                SET @RQ = @RQ + @InQty;
+                SET @WAC = @RV / NULLIF(@RQ, 0);
+            END
+        END
+        ELSE
+        BEGIN
+            -- Outflow is always costed at the last known WAC; the WAC itself
+            -- never changes on an outflow. Negative stock carries no value.
+            SET @RQ = @RQ - ISNULL(@OutQty, 0);
+            SET @RV = @RV - ISNULL(@OutQty, 0) * ISNULL(@WAC, 0);
+            IF @RQ <= 0
+                SET @RV = 0;
+        END
 
         UPDATE #StockLedger
         SET RunningQty = @RQ, RunningValue = @RV, WAC = @WAC
@@ -8692,27 +8717,36 @@ FETCH NEXT FROM ledger_cursor INTO @ID, @InQty, @OutQty, @Rate;
 
 WHILE @@FETCH_STATUS = 0
 BEGIN
-    -- Update running quantity and value
-    SET @RQ = @RQ + ISNULL(@InQty, 0) - ISNULL(@OutQty, 0);
-    SET @RV = @RV + ISNULL(@InQty, 0) * ISNULL(@Rate, 0) 
-                   - ISNULL(@OutQty, 0) * ISNULL(@WAC, 0);
-
-    -- Preserve previous WAC if stock is zero or negative
-    IF @RQ <= 0
+    -- 2026-09-22: same negative-stock WAC policy as Report_StockValuePaging —
+    -- outflows at last WAC, negative stock treated as zero value, and an
+    -- inflow while stock <= 0 resets the WAC to the inflow price.
+    IF ISNULL(@InQty, 0) > 0
     BEGIN
-        SET @RQ = @RQ;  -- just keep the value
-        SET @RV = @RV;
-        -- WAC remains unchanged
-        -- Optional: log it or set a flag if you want to track negative stock
+        IF @RQ <= 0
+        BEGIN
+            IF ISNULL(@Rate, 0) > 0
+                SET @WAC = @Rate;
+            SET @RQ = @RQ + @InQty;
+            SET @RV = CASE WHEN @RQ > 0 THEN @RQ * @WAC ELSE 0 END;
+        END
+        ELSE
+        BEGIN
+            SET @RV = @RV + @InQty * ISNULL(@Rate, 0);
+            SET @RQ = @RQ + @InQty;
+            SET @WAC = @RV / NULLIF(@RQ, 0);
+        END
     END
     ELSE
     BEGIN
-        SET @WAC = @RV / NULLIF(@RQ, 0);
+        SET @RQ = @RQ - ISNULL(@OutQty, 0);
+        SET @RV = @RV - ISNULL(@OutQty, 0) * ISNULL(@WAC, 0);
+        IF @RQ <= 0
+            SET @RV = 0;
     END
 
     UPDATE #StockLedger
-    SET RunningQty = @RQ, 
-        RunningValue = @RV, 
+    SET RunningQty = @RQ,
+        RunningValue = @RV,
         WAC = @WAC
     WHERE ID = @ID;
 
@@ -10860,23 +10894,23 @@ GO
 PRINT 'Section R: Resyncing restaurant.WebMenu from defaultDB.restaurant.WebMenu...';
 GO
 
-IF DB_NAME() = 'defaultDB'
-    PRINT 'Section R skipped: connected to defaultDB itself, which is the source of this sync, not a valid target.';
+IF DB_NAME() = 'defaultDB' OR NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = 'defaultDB')
+    PRINT 'Section R skipped: either connected to defaultDB itself (the source of this sync, never a valid target), or no defaultDB exists on this server to copy from.';
 GO
 
-IF DB_NAME() <> 'defaultDB'
+IF DB_NAME() <> 'defaultDB' AND EXISTS (SELECT 1 FROM sys.databases WHERE name = 'defaultDB')
 BEGIN
     SET IDENTITY_INSERT [restaurant].[WebMenu] ON;
 END
 GO
 
-IF DB_NAME() <> 'defaultDB'
+IF DB_NAME() <> 'defaultDB' AND EXISTS (SELECT 1 FROM sys.databases WHERE name = 'defaultDB')
 BEGIN
     DELETE FROM [restaurant].[WebMenu];
 END
 GO
 
-IF DB_NAME() <> 'defaultDB'
+IF DB_NAME() <> 'defaultDB' AND EXISTS (SELECT 1 FROM sys.databases WHERE name = 'defaultDB')
 BEGIN
     INSERT INTO [restaurant].[WebMenu]
     (
@@ -10912,7 +10946,7 @@ BEGIN
 END
 GO
 
-IF DB_NAME() <> 'defaultDB'
+IF DB_NAME() <> 'defaultDB' AND EXISTS (SELECT 1 FROM sys.databases WHERE name = 'defaultDB')
 BEGIN
     SET IDENTITY_INSERT [restaurant].[WebMenu] OFF;
 END
@@ -11008,6 +11042,82 @@ END CATCH
 GO
 
 PRINT 'Section S complete.';
+GO
+
+-- ============================================================
+-- Phase 7b sales-return columns + TabOrderNo baseline repair.
+-- These column-adds belong logically to Section AE (Sales Return)
+-- but MUST run before Section T and Section AA below: the batched
+-- Sync_SalesTemp_GetAll (Section T) and the Sync_Sales_* procs
+-- (Section AA) reference IsSalesReturn/ReturnAgainstMasterID/
+-- ReturnAgainstBillNo/ReturnReason and TabOrderNo, and on a database
+-- that predates Phase 7b the first run otherwise fails with Msg 207
+-- (seen on Tacos and every cloud test DB, 2026-09-04/05).
+-- TabOrderNo is a baseline repair: older customer DBs have it on
+-- R_SalesMaster but never received it on R_SalesTempMaster, and the
+-- sync GetAll SELECTs read it from both tables.
+-- ============================================================
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesMaster]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'IsSalesReturn')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD IsSalesReturn bit NULL CONSTRAINT DF_R_SalesMaster_IsSalesReturn DEFAULT (0);
+        PRINT 'Added column IsSalesReturn to dbo.R_SalesMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'ReturnAgainstMasterID')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD ReturnAgainstMasterID uniqueidentifier NULL;
+        PRINT 'Added column ReturnAgainstMasterID to dbo.R_SalesMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'ReturnAgainstBillNo')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD ReturnAgainstBillNo varchar(50) NULL;
+        PRINT 'Added column ReturnAgainstBillNo to dbo.R_SalesMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'ReturnReason')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD ReturnReason varchar(250) NULL;
+        PRINT 'Added column ReturnReason to dbo.R_SalesMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'TabOrderNo')
+    BEGIN
+        ALTER TABLE dbo.R_SalesMaster ADD TabOrderNo varchar(100) NULL;
+        PRINT 'Added column TabOrderNo to dbo.R_SalesMaster successfully.';
+    END
+END
+GO
+
+-- dbo.R_SalesTempMaster -- same columns, same reason as every other
+-- Kashkan column add: Insert()/Update() write to whichever of the two
+-- tables IsTemp resolves to, and Day Close moves rows between them.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesTempMaster]') AND type = 'U')
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'IsSalesReturn')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD IsSalesReturn bit NULL CONSTRAINT DF_R_SalesTempMaster_IsSalesReturn DEFAULT (0);
+        PRINT 'Added column IsSalesReturn to dbo.R_SalesTempMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'ReturnAgainstMasterID')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD ReturnAgainstMasterID uniqueidentifier NULL;
+        PRINT 'Added column ReturnAgainstMasterID to dbo.R_SalesTempMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'ReturnAgainstBillNo')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD ReturnAgainstBillNo varchar(50) NULL;
+        PRINT 'Added column ReturnAgainstBillNo to dbo.R_SalesTempMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'ReturnReason')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD ReturnReason varchar(250) NULL;
+        PRINT 'Added column ReturnReason to dbo.R_SalesTempMaster successfully.';
+    END
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesTempMaster') AND name = 'TabOrderNo')
+    BEGIN
+        ALTER TABLE dbo.R_SalesTempMaster ADD TabOrderNo varchar(100) NULL;
+        PRINT 'Added column TabOrderNo to dbo.R_SalesTempMaster successfully.';
+    END
+END
 GO
 
 -- ============================================================
@@ -11125,12 +11235,12 @@ AS
 	SELECT  SM.ID,SM.[GuID],[No],[Date],SectionID,CounterID,BillTime,CustomerID,Total,RTotal,Tax,Cash,[Card],[CardNo],
 	FxPaid,FxTypeID,FxRate,FxAmount,CustomerCredit,Discount,DiscountPercentage,RoundOff,FinancialYearID,
 	UserID,CreatedBy,Remarks,CompanyID,LastUpdate,BranchID,Deleted,Refund,TransactionDate,IsPending,
-	Cancelled,WaiterID,ProdDiscount,CustomerGSTNo,BillNo,SeriesType,TableID,CancelReason,
+	Cancelled,WaiterID,ProdDiscount,CustomerGSTNo,BillNo,SeriesType,TableID,CancelReason,ComplimentaryReason,
 	TokenNo,ISNULL(IsDespatched,0)IsDespatched,ISNULL(IsSettled,0)IsSettled,DeliveryDate,DeliveryTime,DeliveryRemarks,ISNULL(IsShiftClosed,0)IsShiftClosed,ShiftNumber,
 	TabID,Merged,Pax,ISNULL(Redeem,0)Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
 	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
-	convert(BIGINT,Version)[Version],UpdatedUser
-	,SD.[GuID] AS DeliveryID, OrderOpenedDateTime, OrderClosedDateTime
+	TabOrderNo,convert(BIGINT,Version)[Version],UpdatedUser
+	,SD.[GuID] AS DeliveryID, OrderType, OrderOpenedDateTime, OrderClosedDateTime, IsSalesReturn, ReturnAgainstMasterID, ReturnAgainstBillNo, ReturnReason
 	FROM [R_SalesTempMaster] SM
 	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
 	WHERE SM.[GuID] IN (SELECT GuID FROM @ChangedMasterIDs)
@@ -12032,6 +12142,12 @@ GO
 PRINT 'Section Z complete.';
 GO
 
+-- (The Phase 7b sales-return / TabOrderNo column-add block that stood here
+-- was moved to just BEFORE Section T: the batched Sync_SalesTemp_GetAll in
+-- Section T references TabOrderNo and the return columns, so on a database
+-- that predates Phase 7b they must exist before that proc is created --
+-- proven by Msg 207 failures on Tacos and on every cloud test DB.)
+
 -- ============================================================
 -- Section AA - Kashkan fix: ComplimentaryReason missing from sync
 -- pipeline (Web/cloud DB never received it after upload, even
@@ -12157,7 +12273,18 @@ BEGIN
       [UpdatedUser] uniqueidentifier NULL,
       [OrderType] varchar(20) NULL,
       [OrderOpenedDateTime] datetime NULL,
-      [OrderClosedDateTime] datetime NULL
+      [OrderClosedDateTime] datetime NULL,
+      -- The 7b return columns MUST come after OrderClosedDateTime: ADO.NET maps
+      -- a TVP DataTable to the type BY ORDINAL, and both SALE_COLUMNS and every
+      -- already-deployed WebAPI end with ...OrderOpened, OrderClosed. Putting
+      -- the return columns between them shifted OrderClosedDateTime onto
+      -- IsSalesReturn (bit) and broke EVERY sales upload with
+      -- "Operand type clash: datetime2 is incompatible with bit".
+      -- New columns are only ever APPENDED to this type.
+      [IsSalesReturn] bit NULL,
+      [ReturnAgainstMasterID] uniqueidentifier NULL,
+      [ReturnAgainstBillNo] varchar(50) NULL,
+      [ReturnReason] varchar(250) NULL
     )');
     PRINT 'Recreated restaurant.Sale table type with ComplimentaryReason column.';
 END
@@ -12255,7 +12382,11 @@ AS
 	   UpdatedUser = s.UpdatedUser,
 		OrderType= s.OrderType,
 		OrderOpenedDateTime = s.OrderOpenedDateTime,
-		OrderClosedDateTime = s.OrderClosedDateTime
+		OrderClosedDateTime = s.OrderClosedDateTime,
+		IsSalesReturn = s.IsSalesReturn,
+		ReturnAgainstMasterID = s.ReturnAgainstMasterID,
+		ReturnAgainstBillNo = s.ReturnAgainstBillNo,
+		ReturnReason = s.ReturnReason
      WHEN NOT MATCHED BY TARGET THEN
       INSERT
 	(
@@ -12327,7 +12458,7 @@ AS
 		   ,ComplimentaryReason
 		   ,IsPrintedFromPay
 		   ,UpdatedUser,
-		   OrderType,OrderOpenedDateTime,OrderClosedDateTime)
+		   OrderType,OrderOpenedDateTime,OrderClosedDateTime,IsSalesReturn,ReturnAgainstMasterID,ReturnAgainstBillNo,ReturnReason)
      values
 	     ( [GuID],
           [No],
@@ -12397,7 +12528,7 @@ AS
 		  ,ComplimentaryReason
 		  ,IsPrintedFromPay
 		  ,UpdatedUser,
-		  OrderType,OrderOpenedDateTime,OrderClosedDateTime) ;
+		  OrderType,OrderOpenedDateTime,OrderClosedDateTime,IsSalesReturn,ReturnAgainstMasterID,ReturnAgainstBillNo,ReturnReason) ;
 
 
 	-------------------SalesDetailInsertion--------------------------------------------------
@@ -12699,7 +12830,11 @@ DECLARE @BranchID UNIQUEIDENTIFIER = (SELECT TOP 1 BranchID from @sale order by 
 	   UpdatedUser = s.UpdatedUser,
 	   OrderType = S.OrderType,
 	   OrderOpenedDateTime = S.OrderOpenedDateTime,
-	   OrderClosedDateTime = S.OrderClosedDateTime
+	   OrderClosedDateTime = S.OrderClosedDateTime,
+	   IsSalesReturn = s.IsSalesReturn,
+	   ReturnAgainstMasterID = s.ReturnAgainstMasterID,
+	   ReturnAgainstBillNo = s.ReturnAgainstBillNo,
+	   ReturnReason = s.ReturnReason
      WHEN NOT MATCHED BY TARGET THEN
       INSERT
 	(
@@ -12771,7 +12906,7 @@ DECLARE @BranchID UNIQUEIDENTIFIER = (SELECT TOP 1 BranchID from @sale order by 
 		   ,ComplimentaryReason
 		   ,IsPrintedFromPay
 		   ,UpdatedUser,
-		   OrderType,OrderOpenedDateTime,OrderClosedDateTime)
+		   OrderType,OrderOpenedDateTime,OrderClosedDateTime,IsSalesReturn,ReturnAgainstMasterID,ReturnAgainstBillNo,ReturnReason)
      values
 	     ( [GuID],
           [No],
@@ -12841,7 +12976,7 @@ DECLARE @BranchID UNIQUEIDENTIFIER = (SELECT TOP 1 BranchID from @sale order by 
 		  ,ComplimentaryReason
 		  ,IsPrintedFromPay
 		  ,UpdatedUser,
-		  OrderType,OrderOpenedDateTime,OrderClosedDateTime) ;
+		  OrderType,OrderOpenedDateTime,OrderClosedDateTime,IsSalesReturn,ReturnAgainstMasterID,ReturnAgainstBillNo,ReturnReason) ;
 
 
 	-------------------SalesDetailInsertion--------------------------------------------------
@@ -13532,7 +13667,7 @@ AS
 	TabID,Merged,Pax,Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
 	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
 	TabOrderNo,convert(BIGINT,Version)[Version],UpdatedUser
-	,SD.[GuID] AS DeliveryID, OrderType, OrderOpenedDateTime, OrderClosedDateTime
+	,SD.[GuID] AS DeliveryID, OrderType, OrderOpenedDateTime, OrderClosedDateTime, IsSalesReturn, ReturnAgainstMasterID, ReturnAgainstBillNo, ReturnReason
 	FROM [R_SalesMaster] SM
 	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
 	WHERE [Version] > @Version
@@ -13554,42 +13689,15 @@ AS
 GO
 PRINT 'Fixed restaurant.Sync_Sales_GetAll to include ComplimentaryReason.';
 GO
-CREATE OR ALTER PROCEDURE [restaurant].[Sync_SalesTemp_GetAll]
-	@Version BIGINT = NULL
-AS
-
-    SET NOCOUNT ON
-
-	SELECT  SM.ID,SM.[GuID],[No],[Date],SectionID,CounterID,BillTime,CustomerID,Total,RTotal,Tax,Cash,[Card],[CardNo],
-	FxPaid,FxTypeID,FxRate,FxAmount,CustomerCredit,Discount,DiscountPercentage,RoundOff,FinancialYearID,
-	UserID,CreatedBy,Remarks,CompanyID,LastUpdate,BranchID,Deleted,Refund,TransactionDate,IsPending,
-	Cancelled,WaiterID,ProdDiscount,CustomerGSTNo,BillNo,SeriesType,TableID,CancelReason,ComplimentaryReason,
-	TokenNo,ISNULL(IsDespatched,0)IsDespatched,ISNULL(IsSettled,0)IsSettled,DeliveryDate,DeliveryTime,DeliveryRemarks,ISNULL(IsShiftClosed,0)IsShiftClosed,ShiftNumber,
-	TabID,Merged,Pax,ISNULL(Redeem,0)Redeem,ISNULL(RedeemPoints,0)RedeemPoints,NoOfChairs,ChairPositions,TabBillNo,IsComplementary,ComplementaryTotal,
-	CardID,IsprintedFromPay,CessAmount,WaiterRemarks,IsSaved,IsTakenForUpload,EditedAfterUpload,vehicleno,
-	convert(BIGINT,Version)[Version],UpdatedUser
-	,SD.[GuID] AS DeliveryID, OrderOpenedDateTime, OrderClosedDateTime
-	FROM [R_SalesTempMaster] SM
-	LEFT OUTER JOIN [R_SalesDelivery] SD ON SM.[GuID] = SD.MasterID
-	WHERE [Version] > @Version
-
-	SELECT * FROM [R_SalesTempDetail]
-
-	SELECT * FROM [dbo].[R_SalesTempPaymentDetail]
-
-	SELECT * FROM R_SalesTempProductModifierDetail
-
-	SELECT * FROM [R_SalesTempComboDetail]
-
-	SELECT * FROM [R_SalesTempDelivery]
-
-	--SELECT * FROM [R_SalesTempDeliveryDetails]
-
-
-	SET NOCOUNT OFF
-GO
-PRINT 'Fixed restaurant.Sync_SalesTemp_GetAll to include ComplimentaryReason.';
-GO
+-- The Sync_SalesTemp_GetAll redefinition that stood here was REMOVED
+-- (2026-09-04, Tacos support case). It was a stale duplicate of the
+-- batched definition earlier in this script (the 2026-07-20 @BatchSize
+-- version): being later in the file it silently overwrote the batched
+-- proc on every run, and it was missing the R_MiscellaneousSalesAmount
+-- resultset -- Server.Sync reads Tables[6], so every SalesTemp upload
+-- died with "Cannot find table 6" on any site that ran this script.
+-- Its newer columns (ComplimentaryReason + the 7b return columns) were
+-- merged INTO the batched definition instead. One proc, one definition.
 
 PRINT 'Section AA complete.';
 GO
@@ -13761,6 +13869,18 @@ ELSE
     PRINT 'Column Version already exists on dbo.R_VoidLog.';
 GO
 
+-- D -> E -> F ordering, added 2026-08-26. A user-defined table type cannot be
+-- dropped while any procedure still references it, so Sync_VoidLog_Insert must
+-- go FIRST. Without this the block worked on a fresh database (nothing to drop)
+-- but failed on every re-run with Msg 3732 "cannot drop type ... being
+-- referenced by object 'Sync_VoidLog_Insert'", immediately followed by Msg 219
+-- "the type already exists" from the CREATE below -- i.e. the script was not
+-- idempotent. Caught replaying it against a real customer backup. The proc is
+-- recreated further down in this same section, so dropping it here is safe.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[Sync_VoidLog_Insert]') AND type = 'P')
+    DROP PROCEDURE [restaurant].[Sync_VoidLog_Insert];
+GO
+
 IF EXISTS (SELECT 1 FROM sys.table_types WHERE name = 'VoidLog_UDT' AND schema_id = SCHEMA_ID('restaurant'))
     DROP TYPE [restaurant].[VoidLog_UDT];
 GO
@@ -13809,7 +13929,9 @@ CREATE OR ALTER PROCEDURE [restaurant].[Sync_VoidLog_Insert]
     @UDT_VoidLog [restaurant].[VoidLog_UDT] READONLY
 AS
 BEGIN
-    SET NOCOUNT ON;
+    -- NOCOUNT deliberately NOT set: SaleDataAccess.Upload(List<VoidLog>) judges
+    -- success by ExecuteNonQuery's rows-affected, and NOCOUNT ON made that -1,
+    -- so every void upload reported failure while the MERGE had actually landed.
     MERGE dbo.[R_VoidLog] AS trg
     USING @UDT_VoidLog AS s
     ON s.GuID = trg.GuID
@@ -13834,7 +13956,6 @@ BEGIN
                 VoidedByUserID, VoidedByUserName, VoidedDate, CompanyID, FinancialYearID)
         VALUES (s.GuID, s.MasterID, s.BillNo, s.SectionID, s.CounterID, s.BranchID, s.ProductID, s.ProductName, s.Quantity, s.UnitRate, s.Reason,
                 s.VoidedByUserID, s.VoidedByUserName, s.VoidedDate, s.CompanyID, s.FinancialYearID);
-    SET NOCOUNT OFF;
 END
 GO
 PRINT 'Created or altered SP Sync_VoidLog_Insert.';
@@ -14033,4 +14154,1049 @@ PRINT 'Created or altered SP Report_OrderTimingPaging.';
 GO
 
 PRINT 'Section AC complete.';
+GO
+
+-- ============================================================
+-- Section AD - Kashkan Phase 8: VAT Report (Req #9), backend only.
+-- "VAT Report export to excel (Need to create a VAT report in
+-- required format and then export to Excel)". The Excel export
+-- itself is React and is documented in the frontend handover;
+-- this section only produces the data.
+--
+-- Row granularity is one row PER BILL PER VAT RATE, not per bill.
+-- A single bill can carry lines at different rates (15% standard
+-- alongside a 0%/exempt line), and a VAT return needs amounts
+-- grouped by rate -- collapsing to one row per bill would destroy
+-- exactly the split the report exists to show. Aggregating rates
+-- back up is trivial in the export; splitting them afterwards is
+-- not possible.
+--
+-- Taxable amount is (Quantity * UnitRate) - Discount, and VAT sits
+-- on top of it -- REGARDLESS of IsTaxIncludedInPrice. That flag
+-- governs how the price is entered and displayed, not how it is
+-- stored: by the time a line reaches R_SalesDetail its UnitRate has
+-- already been back-calculated to the net amount even when the menu
+-- price was tax-inclusive. Verified against real Saudi VAT data on
+-- the live 'arafa' database (read-only): across all 39,178 taxed
+-- lines -- 32,431 exclusive and 6,747 inclusive -- Tax equals
+-- lineValue * rate/100 with ZERO exceptions, while the
+-- tax-embedded interpretation (lineValue * rate/(100+rate)) fails
+-- on essentially every row. An earlier draft of this proc special-
+-- cased the inclusive flag and subtracted the VAT a second time,
+-- understating taxable value on 2,750 of 2,877 inclusive bills.
+--
+-- UNIONs R_SalesMaster (current, not yet day-closed) and
+-- R_SalesTempMaster (already day-closed), the same way
+-- Report_BillWiseTaxReport and Report_OrderTiming do -- a VAT
+-- period spans many day-closes, so reading only one table would
+-- silently under-report.
+--
+-- REFUNDS AND SALES RETURNS BOTH APPEAR AS NEGATIVE AMOUNTS, and
+-- both carry DocumentType so they can be told apart in the export.
+-- They are treated identically here on purpose: for VAT there is no
+-- meaningful difference between them. Once a tax invoice has been
+-- issued and reported it exists, and reversing the supply requires a
+-- credit note either way -- the only difference is operational, a
+-- refund being whole-bill (a flag toggled on the original row) while
+-- a sales return is its own document against selected items.
+--
+-- Reporting a refunded bill as a positive taxable supply, which an
+-- earlier version of this proc did, overstates output VAT for the
+-- period: the books reverse it through the Refund branch of
+-- DailyClosingMaster.PostToGL, so a VAT report that does not would
+-- disagree with the ledger.
+--
+-- NOTE for the customer's accountant: the WinForms refund path itself
+-- produces NO ZATCA credit note today -- it only flips
+-- R_SalesMaster.Refund. This report now reflects the reversal, but
+-- the credit note that ZATCA expects for it still has to be issued.
+-- That gap is Phase 7c's to close, and it applies to existing refunds
+-- as well as to new sales returns.
+--
+-- OPEN QUESTION for the customer's accountant: complimentary
+-- bills are currently included if they carry tax. Whether a
+-- comp should appear as a taxable supply is a VAT treatment
+-- decision, not a technical one, and is flagged in the handover
+-- rather than silently decided here.
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_VatReport]
+(
+ @FromDate   DATE          = NULL,
+ @ToDate     DATE          = NULL,
+ @BranchID   VARCHAR(MAX)  = NULL,
+ @SectionID  VARCHAR(MAX)  = NULL,
+ @CounterID  VARCHAR(MAX)  = NULL,
+ @CustomerID VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate   DATE          = @FromDate,
+	     @R_ToDate     DATE          = @ToDate,
+	     @R_BranchID   VARCHAR(MAX)  = NULLIF(@BranchID,''),
+	     @R_SectionID  VARCHAR(MAX)  = NULLIF(@SectionID,''),
+	     @R_CounterID  VARCHAR(MAX)  = NULLIF(@CounterID,''),
+	     @R_CustomerID VARCHAR(MAX)  = NULLIF(@CustomerID,'')
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	SELECT * FROM (
+		SELECT SM.TransactionDate, SM.BillNo,
+		       CASE WHEN ISNULL(SM.IsSalesReturn,0)=1 THEN 'SalesReturn' WHEN ISNULL(SM.Refund,0)=1 THEN 'Refund' ELSE 'Sale' END AS DocumentType,
+		       ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       ISNULL(CU.Name,'') AS CustomerName, ISNULL(CU.GSTNo,'') AS CustomerTaxNo,
+		       ISNULL(SD.TaxPercentage,0) AS VatPercentage,
+		       SUM(((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TaxableAmount,
+		       SUM(ISNULL(SD.Tax,0) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS VatAmount,
+		       SUM((((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) + ISNULL(SD.Tax,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TotalAmount
+		FROM R_SalesMaster SM
+		INNER JOIN R_SalesDetail SD ON SD.MasterID = SM.[GuID] AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_Customer CU ON CU.[GuID] = SM.CustomerID
+		WHERE SM.Deleted = 0 AND ISNULL(SM.Cancelled,0) = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.CustomerID = @R_CustomerID OR @R_CustomerID IS NULL)
+		GROUP BY SM.TransactionDate, SM.BillNo, ISNULL(SM.IsSalesReturn,0), ISNULL(SM.Refund,0), S.Name, C.Name, B.Name, CU.Name, CU.GSTNo, SD.TaxPercentage
+		UNION ALL
+		SELECT SM.TransactionDate, SM.BillNo,
+		       CASE WHEN ISNULL(SM.IsSalesReturn,0)=1 THEN 'SalesReturn' WHEN ISNULL(SM.Refund,0)=1 THEN 'Refund' ELSE 'Sale' END AS DocumentType,
+		       ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       ISNULL(CU.Name,'') AS CustomerName, ISNULL(CU.GSTNo,'') AS CustomerTaxNo,
+		       ISNULL(SD.TaxPercentage,0) AS VatPercentage,
+		       SUM(((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TaxableAmount,
+		       SUM(ISNULL(SD.Tax,0) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS VatAmount,
+		       SUM((((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) + ISNULL(SD.Tax,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TotalAmount
+		FROM R_SalesTempMaster SM
+		INNER JOIN R_SalesTempDetail SD ON SD.MasterID = SM.[GuID] AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_Customer CU ON CU.[GuID] = SM.CustomerID
+		WHERE SM.Deleted = 0 AND ISNULL(SM.Cancelled,0) = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.CustomerID = @R_CustomerID OR @R_CustomerID IS NULL)
+		GROUP BY SM.TransactionDate, SM.BillNo, ISNULL(SM.IsSalesReturn,0), ISNULL(SM.Refund,0), S.Name, C.Name, B.Name, CU.Name, CU.GSTNo, SD.TaxPercentage
+	) AS T
+	ORDER BY TransactionDate DESC, BillNo ASC, VatPercentage ASC;
+
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_VatReport.';
+GO
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_VatReportPaging]
+(
+ @FromDate         DATE          = NULL,
+ @ToDate           DATE          = NULL,
+ @BranchID         VARCHAR(MAX)  = NULL,
+ @SectionID        VARCHAR(MAX)  = NULL,
+ @CounterID        VARCHAR(MAX)  = NULL,
+ @CustomerID       VARCHAR(MAX)  = NULL,
+ @PageNumber       INT           = NULL,
+ @PageSize         INT           = NULL,
+ @SortingColumn    VARCHAR(MAX)  = NULL,
+ @SortingDirection VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate         DATE           = @FromDate,
+	     @R_ToDate           DATE           = @ToDate,
+	     @R_BranchID         VARCHAR(MAX)   = NULLIF(@BranchID,''),
+	     @R_SectionID        VARCHAR(MAX)   = NULLIF(@SectionID,''),
+	     @R_CounterID        VARCHAR(MAX)   = NULLIF(@CounterID,''),
+	     @R_CustomerID       VARCHAR(MAX)   = NULLIF(@CustomerID,''),
+	     @R_PageNumber       INT            = @PageNumber,
+	     @R_PageSize         INT            = @PageSize,
+	     @R_SortingColumn    VARCHAR(MAX)   = @SortingColumn,
+	     @R_SortingDirection VARCHAR(MAX)   = ISNULL(@SortingDirection,'DESC')
+
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#VatReport') IS NOT NULL DROP TABLE #VatReport;
+	IF Object_id('TempDB.dbo.#VatReportCount') IS NOT NULL DROP TABLE #VatReportCount;
+
+	SELECT * INTO #VatReport FROM (
+		SELECT SM.TransactionDate, SM.BillNo,
+		       CASE WHEN ISNULL(SM.IsSalesReturn,0)=1 THEN 'SalesReturn' WHEN ISNULL(SM.Refund,0)=1 THEN 'Refund' ELSE 'Sale' END AS DocumentType,
+		       ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       ISNULL(CU.Name,'') AS CustomerName, ISNULL(CU.GSTNo,'') AS CustomerTaxNo,
+		       ISNULL(SD.TaxPercentage,0) AS VatPercentage,
+		       SUM(((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TaxableAmount,
+		       SUM(ISNULL(SD.Tax,0) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS VatAmount,
+		       SUM((((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) + ISNULL(SD.Tax,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TotalAmount
+		FROM R_SalesMaster SM
+		INNER JOIN R_SalesDetail SD ON SD.MasterID = SM.[GuID] AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_Customer CU ON CU.[GuID] = SM.CustomerID
+		WHERE SM.Deleted = 0 AND ISNULL(SM.Cancelled,0) = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.CustomerID = @R_CustomerID OR @R_CustomerID IS NULL)
+		GROUP BY SM.TransactionDate, SM.BillNo, ISNULL(SM.IsSalesReturn,0), ISNULL(SM.Refund,0), S.Name, C.Name, B.Name, CU.Name, CU.GSTNo, SD.TaxPercentage
+		UNION ALL
+		SELECT SM.TransactionDate, SM.BillNo,
+		       CASE WHEN ISNULL(SM.IsSalesReturn,0)=1 THEN 'SalesReturn' WHEN ISNULL(SM.Refund,0)=1 THEN 'Refund' ELSE 'Sale' END AS DocumentType,
+		       ISNULL(S.Name,'') [Section], ISNULL(C.Name,'') [Counter], ISNULL(B.Name,'') [Branch],
+		       ISNULL(CU.Name,'') AS CustomerName, ISNULL(CU.GSTNo,'') AS CustomerTaxNo,
+		       ISNULL(SD.TaxPercentage,0) AS VatPercentage,
+		       SUM(((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TaxableAmount,
+		       SUM(ISNULL(SD.Tax,0) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS VatAmount,
+		       SUM((((SD.Quantity * SD.UnitRate) - ISNULL(SD.Discount,0)) + ISNULL(SD.Tax,0)) * CASE WHEN ISNULL(SM.Refund,0)=1 OR ISNULL(SM.IsSalesReturn,0)=1 THEN -1 ELSE 1 END) AS TotalAmount
+		FROM R_SalesTempMaster SM
+		INNER JOIN R_SalesTempDetail SD ON SD.MasterID = SM.[GuID] AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Counter C ON C.[GuID] = SM.CounterID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_Customer CU ON CU.[GuID] = SM.CustomerID
+		WHERE SM.Deleted = 0 AND ISNULL(SM.Cancelled,0) = 0
+		AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		AND (SM.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+		AND (SM.CustomerID = @R_CustomerID OR @R_CustomerID IS NULL)
+		GROUP BY SM.TransactionDate, SM.BillNo, ISNULL(SM.IsSalesReturn,0), ISNULL(SM.Refund,0), S.Name, C.Name, B.Name, CU.Name, CU.GSTNo, SD.TaxPercentage
+	) AS T;
+
+	SELECT COUNT(*) AS VatCount INTO #VatReportCount FROM #VatReport;
+
+	IF @PageSize=-1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VatCount FROM #VatReportCount)[RowCount] FROM #VatReport ORDER BY TransactionDate '+@R_SortingDirection+',BillNo '+@R_SortingDirection;
+			EXEC(@SortingCmd);
+		END
+		ELSE
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VatCount FROM #VatReportCount)[RowCount],TransactionDate AS TransactionDate1,BillNo AS BillNo1 FROM #VatReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',TransactionDate1 desc,BillNo1 asc';
+			EXEC(@SortingCmd);
+		END
+	END
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VatCount FROM #VatReportCount)[RowCount] FROM #VatReport ORDER BY TransactionDate '+@R_SortingDirection+',BillNo '+@R_SortingDirection+' OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+			EXEC(@SortingCmd);
+		END
+		ELSE
+		BEGIN
+			SELECT @SortingCmd='SELECT *,(SELECT VatCount FROM #VatReportCount)[RowCount],TransactionDate AS TransactionDate1,BillNo AS BillNo1 FROM #VatReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',TransactionDate1 desc,BillNo1 asc OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+			EXEC(@SortingCmd);
+		END
+	END
+
+	SELECT SUM(TaxableAmount) AS TaxableAmount, SUM(VatAmount) AS VatAmount, SUM(TotalAmount) AS TotalAmount FROM #VatReport;
+
+	IF Object_id('TempDB.dbo.#VatReport') IS NOT NULL DROP TABLE #VatReport;
+	IF Object_id('TempDB.dbo.#VatReportCount') IS NOT NULL DROP TABLE #VatReportCount;
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_VatReportPaging.';
+GO
+
+PRINT 'Section AD complete.';
+GO
+
+-- ============================================================
+-- Section AE - Kashkan Phase 7b: Sales Return (Req #6).
+--
+-- DESIGN NOTE -- this deliberately departs from the original plan,
+-- which called for a brand-new SalesReturn table. A refund in this
+-- system is already just a row in R_SalesMaster carrying Refund = 1:
+-- every day-close and reporting query filters "Refund != 1", and the
+-- Day Close Type is derived from those flags with a CASE producing
+-- 'Sales' / 'Refund' / 'Complementary'. Modelling a sales return the
+-- same way -- a flagged row in R_SalesMaster -- means it inherits Day
+-- Close, GL posting, the VAT report, the cloud sync pipeline and the
+-- ZATCA submission path for free. A separate table would have forced
+-- every one of those to be duplicated, which is where the real risk
+-- and cost sit. The customer's "separate series" requirement is about
+-- the NUMBER SERIES, not about physical storage, and is satisfied by
+-- numbering returns from their own pool.
+--
+-- Refund is NOT retired: the customer confirmed both mechanisms stay.
+-- IsSalesReturn is therefore a distinct flag from Refund, not a
+-- rename of it.
+--
+-- Columns are nullable bit/varchar rather than NOT NULL, matching how
+-- Refund/Cancelled/IsComplementary are already handled everywhere via
+-- ISNULL(col,0) -- this keeps the ALTER metadata-only on large live
+-- sales tables instead of forcing a rewrite.
+--
+-- ReturnAgainstMasterID and ReturnAgainstBillNo are not conveniences:
+-- ZATCA requires every credit note to carry a BillingReference to the
+-- exact original invoice (its ID and UUID), and a mismatch is a
+-- BR-KSA-56 rejection. ReturnReason backs the mandatory
+-- InstructionNote (KSA-10) on the credit note. All three are captured
+-- here so Phase 7c has the data it needs.
+-- ============================================================
+
+-- The four column-adds for dbo.R_SalesMaster and dbo.R_SalesTempMaster that
+-- this section introduced were MOVED to just after Section Z (before the
+-- ComplimentaryReason sync section): the Section-AA proc recreations reference
+-- IsSalesReturn and friends, so on a first run against a database that
+-- predates Phase 7b the columns must exist before those procs are created.
+-- (Found on the Tacos DB, 2026-09-04: first run failed with Msg 207 in
+-- Sync_Sales_Insert; a second run "fixed" it, which is how the ordering flaw
+-- stayed invisible on the test databases that already had the columns.)
+
+-- Lookup index: "show me the returns raised against this invoice" is the
+-- question the return screen, the credit-note builder and any audit will
+-- all ask, and without it that is a scan of the whole sales table.
+--
+-- DELIBERATELY NOT A FILTERED INDEX, even though nearly every row has a
+-- NULL reference and a filter would be far smaller. SQL Server requires
+-- QUOTED_IDENTIFIER ON for any INSERT/UPDATE/DELETE against a table
+-- carrying a filtered index -- so a single code path that writes a sale
+-- with that option OFF would start failing with Msg 1934 on the busiest
+-- table in the system. .NET SqlClient sets it ON by default, but this
+-- codebase is old enough and wide enough (WinForms, two APIs, sync
+-- services, sqlcmd-driven scripts) that betting every writer has it right
+-- is not worth a slightly smaller index. Confirmed the hard way: the
+-- filtered version of this index broke a plain sqlcmd INSERT during
+-- testing. A NULL-heavy non-filtered index costs a little space and
+-- imposes nothing on writers.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_SalesMaster]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'ReturnAgainstMasterID')
+   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('dbo.R_SalesMaster') AND name = 'IX_R_SalesMaster_ReturnAgainstMasterID')
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_R_SalesMaster_ReturnAgainstMasterID
+        ON dbo.R_SalesMaster (ReturnAgainstMasterID);
+    PRINT 'Created index IX_R_SalesMaster_ReturnAgainstMasterID.';
+END
+GO
+
+PRINT 'Section AE complete.';
+GO
+
+-- ============================================================
+-- Section AF - Kashkan Phase 7b: partial-return support (Req #6).
+--
+-- Req #6 asks for "option to punch return by selecting a sales
+-- invoice and option to select the items from the sales bill" --
+-- i.e. PARTIAL returns. The customer's own example: a guest orders
+-- biryani and a Pepsi, eats the biryani, and can only hand back the
+-- Pepsi. So the return screen needs the original invoice's lines
+-- with a per-line RETURNABLE quantity, not merely the sold quantity.
+--
+-- The hard part is preventing over-return across MULTIPLE returns.
+-- Nothing stops a guest returning one Pepsi today and another
+-- tomorrow, and nothing stops a second return being raised against
+-- the same invoice by a different cashier. Returnable is therefore
+-- always computed as sold minus everything already returned against
+-- that same original, per product -- never as a simple sold
+-- quantity. This is the query the index added in Section AE exists
+-- to serve.
+--
+-- Both procs UNION R_SalesMaster/R_SalesDetail with their Temp
+-- counterparts, because Req #6 explicitly requires returning against
+-- invoices that are already day-closed ("need option to call sales
+-- invoices that are already closed for return"), and day close moves
+-- rows between the two table pairs.
+--
+-- IsStockItem is carried through on each line because a returned
+-- Pepsi goes back to stock while a returned biryani does not -- see
+-- the Phase 7b stock-back work. The flag is stored and synced today
+-- but consumed by nothing, so this is its first real use.
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[SalesReturn_SearchInvoices]
+(
+ @BillNo     VARCHAR(50)   = NULL,
+ @FromDate   DATE          = NULL,
+ @ToDate     DATE          = NULL,
+ @BranchID   VARCHAR(MAX)  = NULL,
+ @SectionID  VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_BillNo    VARCHAR(50)   = NULLIF(@BillNo,''),
+	     @R_FromDate  DATE          = @FromDate,
+	     @R_ToDate    DATE          = @ToDate,
+	     @R_BranchID  VARCHAR(MAX)  = NULLIF(@BranchID,''),
+	     @R_SectionID VARCHAR(MAX)  = NULLIF(@SectionID,'')
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	SELECT * FROM (
+		SELECT SM.[GuID] AS MasterID, SM.BillNo, SM.TransactionDate,
+		       ISNULL(S.Name,'') [Section], ISNULL(B.Name,'') [Branch],
+		       ISNULL(CU.Name,'') AS CustomerName, ISNULL(CU.GSTNo,'') AS CustomerTaxNo,
+		       (SM.Total+SM.Tax+SM.CessAmount-SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff) AS NetTotal,
+		       CAST(0 AS BIT) AS IsDayClosed
+		FROM R_SalesMaster SM
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_Customer CU ON CU.[GuID] = SM.CustomerID
+		WHERE SM.Deleted = 0 AND ISNULL(SM.Cancelled,0) = 0
+		  AND ISNULL(SM.IsSalesReturn,0) = 0 AND ISNULL(SM.Refund,0) = 0
+		  AND (SM.BillNo = @R_BillNo OR @R_BillNo IS NULL)
+		  AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		  AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		  AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		  AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+		UNION ALL
+		SELECT SM.[GuID] AS MasterID, SM.BillNo, SM.TransactionDate,
+		       ISNULL(S.Name,'') [Section], ISNULL(B.Name,'') [Branch],
+		       ISNULL(CU.Name,'') AS CustomerName, ISNULL(CU.GSTNo,'') AS CustomerTaxNo,
+		       (SM.Total+SM.Tax+SM.CessAmount-SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff) AS NetTotal,
+		       CAST(1 AS BIT) AS IsDayClosed
+		FROM R_SalesTempMaster SM
+		LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = SM.SectionID
+		LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+		LEFT OUTER JOIN R_Customer CU ON CU.[GuID] = SM.CustomerID
+		WHERE SM.Deleted = 0 AND ISNULL(SM.Cancelled,0) = 0
+		  AND ISNULL(SM.IsSalesReturn,0) = 0 AND ISNULL(SM.Refund,0) = 0
+		  AND (SM.BillNo = @R_BillNo OR @R_BillNo IS NULL)
+		  AND (SM.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+		  AND (SM.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+		  AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		  AND (SM.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+	) AS T
+	ORDER BY TransactionDate DESC, BillNo DESC;
+
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP SalesReturn_SearchInvoices.';
+GO
+
+CREATE OR ALTER PROCEDURE [restaurant].[SalesReturn_GetReturnableItems]
+(
+ @MasterID UNIQUEIDENTIFIER = NULL
+)
+AS
+BEGIN
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+
+	IF @MasterID IS NULL
+	BEGIN
+		SET NOCOUNT OFF;
+		RETURN;
+	END
+
+	-- Lines of the original invoice, from whichever pair of tables it lives in.
+	-- Aggregated by product: the same item can appear on several lines of one
+	-- bill (added at different times, different courses), and a return is
+	-- against the product, not against a particular line.
+	IF Object_id('TempDB.dbo.#Sold') IS NOT NULL DROP TABLE #Sold;
+	SELECT ProductID,
+	       SUM(Quantity)                                        AS SoldQuantity,
+	       SUM(CASE WHEN Quantity <> 0 THEN Quantity ELSE 0 END) AS QtyForRate,
+	       SUM((Quantity * UnitRate) - ISNULL(Discount,0))       AS LineNet,
+	       SUM(ISNULL(Tax,0))                                    AS LineTax,
+	       MAX(TaxPercentage)                                    AS TaxPercentage,
+	       MAX(CAST(TaxID AS VARCHAR(50)))                       AS TaxID
+	INTO #Sold
+	FROM (
+		SELECT SD.ProductID, SD.Quantity, SD.UnitRate, SD.Discount, SD.Tax, SD.TaxPercentage, SD.TaxID
+		FROM R_SalesDetail SD
+		WHERE SD.MasterID = @MasterID AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		UNION ALL
+		SELECT SD.ProductID, SD.Quantity, SD.UnitRate, SD.Discount, SD.Tax, SD.TaxPercentage, SD.TaxID
+		FROM R_SalesTempDetail SD
+		WHERE SD.MasterID = @MasterID AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+	) AS L
+	GROUP BY ProductID;
+
+	-- Everything already returned against this same original, from any earlier
+	-- return document, in either table pair. Without this a guest could return
+	-- the same Pepsi twice, or two cashiers could each return it once.
+	IF Object_id('TempDB.dbo.#Returned') IS NOT NULL DROP TABLE #Returned;
+	SELECT ProductID, SUM(Quantity) AS ReturnedQuantity
+	INTO #Returned
+	FROM (
+		SELECT SD.ProductID, SD.Quantity
+		FROM R_SalesMaster RM
+		INNER JOIN R_SalesDetail SD ON SD.MasterID = RM.[GuID] AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		WHERE ISNULL(RM.IsSalesReturn,0) = 1 AND RM.ReturnAgainstMasterID = @MasterID
+		  AND RM.Deleted = 0 AND ISNULL(RM.Cancelled,0) = 0
+		UNION ALL
+		SELECT SD.ProductID, SD.Quantity
+		FROM R_SalesTempMaster RM
+		INNER JOIN R_SalesTempDetail SD ON SD.MasterID = RM.[GuID] AND SD.Deleted = 0 AND ISNULL(SD.Cancelled,0) = 0
+		WHERE ISNULL(RM.IsSalesReturn,0) = 1 AND RM.ReturnAgainstMasterID = @MasterID
+		  AND RM.Deleted = 0 AND ISNULL(RM.Cancelled,0) = 0
+	) AS R
+	GROUP BY ProductID;
+
+	SELECT S.ProductID,
+	       ISNULL(P.Name,'')              AS ProductName,
+	       ISNULL(P.ArabicDescription,'') AS ProductNameArabic,
+	       ISNULL(P.IsStockItem,0)        AS IsStockItem,
+	       S.SoldQuantity,
+	       ISNULL(R.ReturnedQuantity,0)   AS AlreadyReturnedQuantity,
+	       -- Never negative: a manual data fix or a legacy over-return would
+	       -- otherwise hand the screen a negative "returnable" to work with.
+	       CASE WHEN S.SoldQuantity - ISNULL(R.ReturnedQuantity,0) > 0
+	            THEN S.SoldQuantity - ISNULL(R.ReturnedQuantity,0)
+	            ELSE 0 END                AS ReturnableQuantity,
+	       -- Per-unit figures, so the screen can price whatever quantity the
+	       -- user actually chooses to return rather than assuming the whole line.
+	       CASE WHEN S.SoldQuantity <> 0 THEN S.LineNet / S.SoldQuantity ELSE 0 END AS UnitRate,
+	       CASE WHEN S.SoldQuantity <> 0 THEN S.LineTax / S.SoldQuantity ELSE 0 END AS TaxPerUnit,
+	       S.TaxPercentage,
+	       S.TaxID
+	FROM #Sold S
+	LEFT OUTER JOIN R_Product P ON P.[GuID] = S.ProductID
+	LEFT OUTER JOIN #Returned R ON R.ProductID = S.ProductID
+	ORDER BY ProductName;
+
+	IF Object_id('TempDB.dbo.#Sold') IS NOT NULL DROP TABLE #Sold;
+	IF Object_id('TempDB.dbo.#Returned') IS NOT NULL DROP TABLE #Returned;
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP SalesReturn_GetReturnableItems.';
+GO
+
+PRINT 'Section AF complete.';
+GO
+
+-- ============================================================
+-- Section AG - Kashkan Phase 7b: Sales Return save + numbering.
+--
+-- One proc doing master + details + numbering inside a single
+-- transaction, rather than several C# round trips. The number is
+-- allocated INSIDE the transaction under UPDLOCK/HOLDLOCK so two
+-- tills returning at the same moment cannot take the same number --
+-- a duplicate return number is a ZATCA problem, not merely untidy.
+--
+-- NUMBERING: its own pool, starting at 1, CONTINUOUS and never
+-- reset. Deliberately does NOT reuse the sales-invoice numbering
+-- logic, which is configurable per site (SeriesType, reset-daily vs
+-- continuous, per-section/counter start numbers) -- ZATCA expects
+-- sequential numbering without gaps, so the return series cannot be
+-- allowed to reset daily just because a site configured its sales
+-- series that way.
+--
+-- The return is a NEW R_SalesMaster row with IsSalesReturn = 1, not
+-- an edit of the original: the original invoice is only ever read.
+-- That is what Req #6 asks for and what ZATCA needs (the original
+-- must survive intact to be referenced by the credit note).
+--
+-- Amounts are stored POSITIVE, exactly as a refund is. Day Close
+-- buckets the row as 'SalesReturn' and PostToGL debits
+-- SALES_RTN_LEDGER / credits cash, which is what applies the sign.
+-- Storing negatives here would double-reverse it.
+-- ============================================================
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[SalesReturn_Save]') AND type = 'P')
+    DROP PROCEDURE [restaurant].[SalesReturn_Save];
+GO
+IF EXISTS (SELECT 1 FROM sys.table_types WHERE name = 'SalesReturnItem_UDT' AND schema_id = SCHEMA_ID('restaurant'))
+    DROP TYPE [restaurant].[SalesReturnItem_UDT];
+GO
+
+CREATE TYPE [restaurant].[SalesReturnItem_UDT] AS TABLE (
+    [ProductID]            uniqueidentifier NOT NULL,
+    [Quantity]             decimal(18,3)    NOT NULL,
+    [UnitRate]             decimal(18,6)    NOT NULL,
+    [TaxPerUnit]           decimal(18,6)    NOT NULL,
+    [TaxPercentage]        decimal(18,4)    NULL,
+    [TaxID]                uniqueidentifier NULL
+);
+GO
+PRINT 'Created restaurant.SalesReturnItem_UDT.';
+GO
+
+CREATE PROCEDURE [restaurant].[SalesReturn_Save]
+(
+ @OriginalMasterID UNIQUEIDENTIFIER,
+ @Reason           VARCHAR(250),
+ @UserID           UNIQUEIDENTIFIER = NULL,
+ @CounterID        UNIQUEIDENTIFIER = NULL,
+ @Items            [restaurant].[SalesReturnItem_UDT] READONLY,
+ @NewMasterID      UNIQUEIDENTIFIER = NULL OUTPUT,
+ @NewBillNo        VARCHAR(50)      = NULL OUTPUT
+)
+AS
+BEGIN
+	SET NOCOUNT ON; SET XACT_ABORT ON;
+
+	IF @OriginalMasterID IS NULL OR NOT EXISTS (SELECT 1 FROM @Items)
+	BEGIN
+		RAISERROR('A sales return needs an original invoice and at least one item.', 16, 1);
+		RETURN;
+	END
+
+	BEGIN TRY
+		BEGIN TRANSACTION;
+
+		-- Read the original. It lives in whichever table pair day close left it in.
+		-- Inherit company/branch/section/user context from the original invoice rather
+		-- than trying to reconstruct it: the return belongs to the same books as the sale
+		-- it reverses. UserID is an int on this table while CreatedBy is a uniqueidentifier
+		-- -- they are different things, not two spellings of the same one.
+		DECLARE @SectionID uniqueidentifier, @BranchID uniqueidentifier, @CustomerID uniqueidentifier,
+		        @CompanyID int, @FinancialYearID int, @OrigBillNo varchar(50), @OrigCounterID uniqueidentifier,
+		        @OrigUserIDInt int, @OrigCreatedBy uniqueidentifier;
+
+		SELECT TOP 1 @SectionID = SectionID, @BranchID = BranchID, @CustomerID = CustomerID,
+		             @CompanyID = CompanyID, @FinancialYearID = FinancialYearID, @OrigBillNo = BillNo,
+		             @OrigCounterID = CounterID, @OrigUserIDInt = UserID, @OrigCreatedBy = CreatedBy
+		FROM (
+			SELECT SectionID, BranchID, CustomerID, CompanyID, FinancialYearID, BillNo, CounterID, UserID, CreatedBy
+			FROM R_SalesMaster WHERE [GuID] = @OriginalMasterID
+			UNION ALL
+			SELECT SectionID, BranchID, CustomerID, CompanyID, FinancialYearID, BillNo, CounterID, UserID, CreatedBy
+			FROM R_SalesTempMaster WHERE [GuID] = @OriginalMasterID
+		) AS O;
+
+		IF @OrigBillNo IS NULL
+		BEGIN
+			RAISERROR('The original invoice could not be found.', 16, 1);
+			ROLLBACK TRANSACTION; RETURN;
+		END
+
+		-- Refuse to over-return, re-checked here rather than trusting the screen:
+		-- two tills could each have passed their own check a moment ago.
+		IF EXISTS (
+			SELECT 1 FROM @Items i
+			OUTER APPLY (
+				SELECT SUM(x.Qty) AS Sold FROM (
+					SELECT Quantity Qty FROM R_SalesDetail WHERE MasterID=@OriginalMasterID AND ProductID=i.ProductID AND Deleted=0 AND ISNULL(Cancelled,0)=0
+					UNION ALL
+					SELECT Quantity FROM R_SalesTempDetail WHERE MasterID=@OriginalMasterID AND ProductID=i.ProductID AND Deleted=0 AND ISNULL(Cancelled,0)=0
+				) x
+			) s
+			OUTER APPLY (
+				SELECT SUM(y.Qty) AS Returned FROM (
+					SELECT d.Quantity Qty FROM R_SalesMaster m INNER JOIN R_SalesDetail d ON d.MasterID=m.[GuID] AND d.Deleted=0 AND ISNULL(d.Cancelled,0)=0
+					WHERE ISNULL(m.IsSalesReturn,0)=1 AND m.ReturnAgainstMasterID=@OriginalMasterID AND m.Deleted=0 AND ISNULL(m.Cancelled,0)=0 AND d.ProductID=i.ProductID
+					UNION ALL
+					SELECT d.Quantity FROM R_SalesTempMaster m INNER JOIN R_SalesTempDetail d ON d.MasterID=m.[GuID] AND d.Deleted=0 AND ISNULL(d.Cancelled,0)=0
+					WHERE ISNULL(m.IsSalesReturn,0)=1 AND m.ReturnAgainstMasterID=@OriginalMasterID AND m.Deleted=0 AND ISNULL(m.Cancelled,0)=0 AND d.ProductID=i.ProductID
+				) y
+			) r
+			WHERE i.Quantity > (ISNULL(s.Sold,0) - ISNULL(r.Returned,0))
+		)
+		BEGIN
+			RAISERROR('One or more items exceed the quantity still available to return.', 16, 1);
+			ROLLBACK TRANSACTION; RETURN;
+		END
+
+		-- Allocate the next return number under a lock, inside the transaction.
+		DECLARE @No int;
+		SELECT @No = ISNULL(MAX(No), 0) + 1
+		FROM R_SalesMaster WITH (UPDLOCK, HOLDLOCK)
+		WHERE ISNULL(IsSalesReturn,0) = 1;
+
+		SET @NewMasterID = NEWID();
+		SET @NewBillNo   = CAST(@No AS varchar(50));
+
+		DECLARE @Total money, @Tax money;
+		SELECT @Total = SUM(Quantity * UnitRate), @Tax = SUM(Quantity * TaxPerUnit) FROM @Items;
+
+		-- Every NOT NULL column without a default must be supplied explicitly
+		-- (BillTime, CardNo, FxRate, DiscountPercentage, Remarks among them).
+		INSERT INTO R_SalesMaster
+		   ([GuID], No, BillNo, SectionID, CounterID, BranchID, CustomerID, CompanyID, FinancialYearID,
+		    TransactionDate, [Date], BillTime, Total, Tax, Discount, DiscountPercentage, ProdDiscount,
+		    RoundOff, CessAmount, Cash, CardNo, FxRate, Remarks,
+		    Deleted, Cancelled, IsPending, IsSettled, Refund,
+		    IsSalesReturn, ReturnAgainstMasterID, ReturnAgainstBillNo, ReturnReason,
+		    UserID, CreatedBy, UpdatedUser, LastUpdate)
+		VALUES
+		   (@NewMasterID, @No, @NewBillNo, @SectionID, ISNULL(@CounterID,@OrigCounterID), @BranchID, @CustomerID, @CompanyID, @FinancialYearID,
+		    GETDATE(), GETDATE(), GETDATE(), @Total, @Tax, 0, 0, 0,
+		    0, 0, (@Total + @Tax), '', 0, '',
+		    0, 0, 0, 1, 0,
+		    1, @OriginalMasterID, @OrigBillNo, @Reason,
+		    @OrigUserIDInt, ISNULL(@UserID, @OrigCreatedBy), @UserID, GETDATE());
+
+		-- CourseNo has no default and Server.Sync used to read it unguarded;
+		-- supply 0 so return detail rows are shaped like normal POS rows.
+		INSERT INTO R_SalesDetail
+		   ([GuID], MasterID, ProductID, Quantity, BaseQuantity, UnitRate, TaxID, TaxPercentage, Tax,
+		    DiscPercentage, Discount, Deleted, Cancelled, IsTaxIncludedInPrice, CourseNo)
+		SELECT NEWID(), @NewMasterID, i.ProductID, i.Quantity, i.Quantity, i.UnitRate, i.TaxID,
+		       i.TaxPercentage, (i.Quantity * i.TaxPerUnit), 0, 0, 0, 0, 0, 0
+		FROM @Items i;
+
+		COMMIT TRANSACTION;
+
+		SELECT @NewMasterID AS NewMasterID, @NewBillNo AS NewBillNo;
+	END TRY
+	BEGIN CATCH
+		IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+		THROW;
+	END CATCH
+
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP SalesReturn_Save.';
+GO
+
+PRINT 'Section AG complete.';
+GO
+
+-- ============================================================
+-- Section AH - WebMenu entries for the Phase 4 Void Report and the
+-- Phase 5 Order Timing report, plus their permissions.
+--
+-- Both are placed under POS SALES, alongside Cancelled Sales,
+-- Deleted Sales and Refunded Sales -- they answer the same kind of
+-- question about what happened to a bill, so that is where a user
+-- will look for them.
+--
+-- The parent is resolved by NAME at run time, never by a hardcoded
+-- ID: restaurant.WebMenu.ID is an IDENTITY and therefore a per-
+-- database value, so 'POS SALES' is 6 on defaultDB but need not be
+-- anywhere else. This is the same lesson Section Z already encodes.
+--
+-- GuIDs are fixed literals so the same logical menu item is
+-- identifiable across every database, and so re-running this cannot
+-- create duplicates.
+--
+-- Permissions are handled here too, because Sections R and Z copy
+-- WebMenu rows but NOT restaurant.UserWebMenuPermission -- a menu
+-- item with no permission row renders for nobody, which looks
+-- exactly like the entry having failed to insert.
+-- ============================================================
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    -- The category is identified by WHAT IT CONTAINS first, and only then by name.
+    -- Its label is not stable across the estate: defaultDB and the cloud DBs call it
+    -- 'POS SALES', while databases still on the older menu generation (local kashkan,
+    -- MeatPoint) call the very same category 'SALES REPORTS'. Matching on the name
+    -- alone silently skipped both of those.
+    DECLARE @PosSalesID int =
+        (SELECT TOP 1 ParentID FROM restaurant.WebMenu
+         WHERE Name IN ('Cancelled Sales','Refunded Sales','Deleted Sales') AND ISNULL(ParentID,0) <> 0
+         GROUP BY ParentID ORDER BY COUNT(*) DESC, ParentID);
+
+    IF @PosSalesID IS NULL
+        SET @PosSalesID = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name IN ('POS SALES','SALES REPORTS') ORDER BY ID);
+
+    IF @PosSalesID IS NULL
+        PRINT 'Section AH skipped: no POS SALES / SALES REPORTS category found in restaurant.WebMenu.';
+    ELSE
+    BEGIN
+        SET IDENTITY_INSERT restaurant.WebMenu OFF;
+
+        IF NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = 'A1B2C3D4-0001-4E6F-9A8B-6C2D3E4F5A11')
+        BEGIN
+            INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, IsSubMenu, ControllerName, IsActive)
+            VALUES ('A1B2C3D4-0001-4E6F-9A8B-6C2D3E4F5A11', 'Void Report', @PosSalesID,
+                    '/Reports/VoidReport/Index', 'CheckCircle', 1, 'VoidReport', 1);
+            PRINT 'Inserted WebMenu entry Void Report under POS SALES.';
+        END
+        ELSE
+            PRINT 'WebMenu entry Void Report already exists.';
+
+        IF NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = 'A1B2C3D4-0002-4E6F-9A8B-6C2D3E4F5A12')
+        BEGIN
+            INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, IsSubMenu, ControllerName, IsActive)
+            VALUES ('A1B2C3D4-0002-4E6F-9A8B-6C2D3E4F5A12', 'Order Timing Report', @PosSalesID,
+                    '/Reports/OrderTimingReport/Index', 'CheckCircle', 1, 'OrderTimingReport', 1);
+            PRINT 'Inserted WebMenu entry Order Timing Report under POS SALES.';
+        END
+        ELSE
+            PRINT 'WebMenu entry Order Timing Report already exists.';
+    END
+END
+GO
+
+-- Full rights for the System user type on both new reports.
+-- UserTypeID is resolved by name rather than assumed to be 1, since it is
+-- an identity value like everything else here.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[UserWebMenuPermission]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    DECLARE @SystemTypeID int = (SELECT TOP 1 ID FROM dbo.R_UserType WHERE Name = 'System' ORDER BY ID);
+
+    IF @SystemTypeID IS NULL
+        PRINT 'Section AH: no System user type found, permissions skipped.';
+    ELSE
+    BEGIN
+        DECLARE @NewMenus TABLE (MenuID int);
+        INSERT INTO @NewMenus (MenuID)
+        SELECT ID FROM restaurant.WebMenu
+        WHERE GuID IN ('A1B2C3D4-0001-4E6F-9A8B-6C2D3E4F5A11', 'A1B2C3D4-0002-4E6F-9A8B-6C2D3E4F5A12');
+
+        INSERT INTO restaurant.UserWebMenuPermission (GuID, UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+        SELECT NEWID(), @SystemTypeID, n.MenuID, 1, 1, 1, 1
+        FROM @NewMenus n
+        WHERE NOT EXISTS (SELECT 1 FROM restaurant.UserWebMenuPermission p
+                          WHERE p.MenuID = n.MenuID AND p.UserTypeID = @SystemTypeID);
+
+        IF @@ROWCOUNT > 0
+            PRINT 'Granted System user type full rights on the Void Report and Order Timing Report menus.';
+        ELSE
+            PRINT 'System user type already had rights on those menus (or the menus are not present).';
+    END
+END
+GO
+
+PRINT 'Section AH complete.';
+GO
+
+-- ============================================================
+-- Section AI - WinForms menu entry for the Sales Return screen
+-- (Phase 7b, Req #6), plus permission for the System user type.
+--
+-- This is the WINDOWS menu (dbo.R_Menu), which is a different thing
+-- from the web menu handled in Section AH (restaurant.WebMenu). The
+-- WinForms app reads R_Menu; the React app reads WebMenu. A screen
+-- that exists in one is invisible in the other.
+--
+-- Module MUST be 'SalesReturn' exactly: ButtonActionMaping.Show()
+-- switches on this string to decide which form to open, so a typo
+-- here produces a menu button that is present, clickable, and does
+-- nothing at all.
+--
+-- The parent is resolved by name at run time rather than hardcoded.
+-- dbo.R_Menu.ID is an IDENTITY, so 'Transaction' is 3 on the
+-- databases seen so far but is not guaranteed to be anywhere else,
+-- and the label itself varies ('Transaction' vs 'TRANSACTIONS').
+-- ============================================================
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_Menu]') AND type = 'U')
+BEGIN
+    -- Identify the Transactions group by what it contains before trusting its label:
+    -- the Sales screen always lives there, on every database seen.
+    DECLARE @TxnMenuID int =
+        (SELECT TOP 1 ParentID FROM dbo.R_Menu
+         WHERE Module IN ('Sales','DailyClosing') AND ISNULL(ParentID,0) <> 0
+         GROUP BY ParentID ORDER BY COUNT(*) DESC, ParentID);
+
+    IF @TxnMenuID IS NULL
+        SET @TxnMenuID = (SELECT TOP 1 ID FROM dbo.R_Menu
+                          WHERE Name IN ('Transaction','Transactions','TRANSACTIONS') ORDER BY ID);
+
+    IF @TxnMenuID IS NULL
+        PRINT 'Section AI skipped: no Transactions menu group found in dbo.R_Menu.';
+    ELSE IF EXISTS (SELECT 1 FROM dbo.R_Menu WHERE Module = 'SalesReturn')
+        PRINT 'R_Menu entry Sales Return already exists.';
+    ELSE
+    BEGIN
+        INSERT INTO dbo.R_Menu (Name, ShortName, Image, Active, Module, ParentID, [Index], OtherLanguage, GuID)
+        VALUES ('Sales Return', 'Sales Return', '', 1, 'SalesReturn', @TxnMenuID, 0, 0,
+                'B7C1D2E3-0003-4F5A-8B6C-7D8E9F0A1B2C');
+        PRINT 'Inserted R_Menu entry Sales Return under the Transactions menu.';
+    END
+END
+GO
+
+-- Full rights for the System user type on the Sales Return screen.
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_UserMenuPermission]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_Menu]') AND type = 'U')
+BEGIN
+    DECLARE @SysTypeID int = (SELECT TOP 1 ID FROM dbo.R_UserType WHERE Name = 'System' ORDER BY ID);
+    DECLARE @SRMenuID  int = (SELECT TOP 1 ID FROM dbo.R_Menu WHERE Module = 'SalesReturn' ORDER BY ID);
+
+    IF @SysTypeID IS NULL OR @SRMenuID IS NULL
+        PRINT 'Section AI: System user type or Sales Return menu not found, permission skipped.';
+    ELSE
+    BEGIN
+        -- BOTH permission tables, deliberately. dbo.UserMenuPermission is the one the
+        -- app actually reads: UserMenuPermission.GetMenuObjectsByParentID INNER JOINs
+        -- "UserMenuPermission" (no R_ prefix) to decide which buttons to draw, so a row
+        -- only in dbo.R_UserMenuPermission leaves the menu item invisible with no error
+        -- anywhere -- exactly how this was first shipped. Existing siblings such as
+        -- Sales carry rows in both tables, so both are populated to match.
+        IF NOT EXISTS (SELECT 1 FROM dbo.UserMenuPermission WHERE MenuID = @SRMenuID AND UserTypeID = @SysTypeID)
+        BEGIN
+            INSERT INTO dbo.UserMenuPermission (UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+            VALUES (@SysTypeID, @SRMenuID, 1, 1, 1, 1);
+            PRINT 'Granted System user type rights on the Sales Return menu (UserMenuPermission).';
+        END
+        ELSE
+            PRINT 'System already had rights in UserMenuPermission.';
+
+        IF NOT EXISTS (SELECT 1 FROM dbo.R_UserMenuPermission WHERE MenuID = @SRMenuID AND UserTypeID = @SysTypeID)
+        BEGIN
+            INSERT INTO dbo.R_UserMenuPermission (UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+            VALUES (@SysTypeID, @SRMenuID, 1, 1, 1, 1);
+            PRINT 'Granted System user type rights on the Sales Return menu (R_UserMenuPermission).';
+        END
+        ELSE
+            PRINT 'System already had rights in R_UserMenuPermission.';
+    END
+END
+GO
+
+PRINT 'Section AI complete.';
+GO
+
+-- ============================================================
+-- Section AJ - Kashkan Phase 7b: returned stock goes back on the
+-- shelf (Req #6, the "Pepsi comes back, biryani does not" case).
+--
+-- This system keeps NO running stock balance: nothing decrements
+-- stock when a sale is made, and there are no stock movement rows
+-- for POS sales. Availability is derived at report time as
+-- (stock entered) - (quantity sold). So "add it back to stock" has
+-- nowhere to write to -- it has to be done in the calculation.
+--
+-- Left alone, a sales return made things WORSE rather than better:
+-- a return is a normal R_SalesMaster row with detail lines, so the
+-- old SUM(SD.Quantity) counted the returned Pepsi as ANOTHER sale
+-- and reduced available stock a second time.
+--
+-- Now each line is signed: a sale subtracts, a return of a stock
+-- item adds back, and a return of a non-stock item does neither.
+-- That last case is the important one -- a returned biryani must
+-- stay subtracted, because the food is gone whatever the paperwork
+-- says. IsStockItem is what separates the two, which is its first
+-- real use; it has been stored and synced for years and read by
+-- nothing.
+--
+-- Report_ProductStockReport was not in this script at all, which is
+-- the same gap that produced the alyuom ZoneGuID outage. Before
+-- adding it here its live definition was compared across local
+-- kashkan, MeatPoint, defaultDB, brtest and the live arafa: all five
+-- byte-identical, so there is no per-customer hotfix being clobbered.
+-- ============================================================
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_ProductStockReport] (
+ @FromDate       DATETIME	  = NULL,
+ @ToDate         DATETIME	  = NULL,
+ @Product         VARCHAR(MAX)	  = NULL)
+ AS
+BEGIN
+			DECLARE
+ @R_FromDate       DATETIME	  = @FromDate,
+ @R_ToDate         DATETIME	  = @ToDate,
+ @R_Product         VARCHAR(MAX)	  = @Product
+ SET ARITHABORT ON
+	SET XACT_ABORT ON
+	SET NOCOUNT ON
+
+    SET @R_ToDate = DATEADD(D, 1, @R_ToDate); 
+  SELECT SP.[date],SP.Quantity AS Stock,[Name],
+		SUM(CASE WHEN ISNULL(STM.IsSalesReturn,0) = 1
+		         THEN CASE WHEN ISNULL(P.IsStockItem,0) = 1 THEN -STD.Quantity ELSE 0 END
+		         ELSE STD.Quantity END) salequantity,BasePrice,
+				Cost as Cost,
+		(SP.Quantity - SUM(CASE WHEN ISNULL(STM.IsSalesReturn,0) = 1
+		                        THEN CASE WHEN ISNULL(P.IsStockItem,0) = 1 THEN -STD.Quantity ELSE 0 END
+		                        ELSE STD.Quantity END)) as 'BalanceQuantity'
+		FROM R_StockProduct SP
+		INNER JOIN R_Product P ON P.GuID=SP.ProductId
+		INNER JOIN R_SalesTempDetail STD ON P.GuID=STD.ProductId
+		INNER JOIN R_SalesTempMaster STM On STM.[GuID] = STD.MasterID 
+		AND (STM.TransactionDate=SP.[date])
+		WHERE (SP.[date]>=@R_FromDate OR @R_FromDate IS NULL) AND ( SP.[date]<@R_ToDate OR @R_ToDate IS NULL)
+		AND (SP.ProductId= @R_Product OR @R_Product IS NULL) AND IsDailyStockItem=1
+		GROUP BY SP.[date],SP.Quantity,[Name],BasePrice,Cost
+		union all
+		 SELECT SP.[date],SP.Quantity AS Stock,[Name],
+		SUM(CASE WHEN ISNULL(SM.IsSalesReturn,0) = 1
+		         THEN CASE WHEN ISNULL(P.IsStockItem,0) = 1 THEN -SD.Quantity ELSE 0 END
+		         ELSE SD.Quantity END) salequantity,BasePrice,
+				Cost as Cost,
+		(SP.Quantity - SUM(CASE WHEN ISNULL(SM.IsSalesReturn,0) = 1
+		                        THEN CASE WHEN ISNULL(P.IsStockItem,0) = 1 THEN -SD.Quantity ELSE 0 END
+		                        ELSE SD.Quantity END)) as 'BalanceQuantity'
+		FROM R_StockProduct SP
+		INNER JOIN R_Product P ON P.GuID=SP.ProductId
+		INNER JOIN R_SalesDetail SD ON P.GuID=SD.ProductId
+		INNER JOIN R_SalesMaster SM On SM.[GuID] = SD.MasterID 
+		AND (SM.TransactionDate=SP.[date])
+		WHERE (SP.[date]>=@R_FromDate OR @R_FromDate IS NULL) AND ( SP.[date]<@R_ToDate OR @R_ToDate IS NULL)
+		AND (SP.ProductId= @R_Product OR @R_Product IS NULL) AND IsDailyStockItem=1
+		GROUP BY SP.[date],SP.Quantity,[Name],BasePrice,Cost
+
+		ORDER BY [date],[Name]
+ SET NOCOUNT OFF
+END
+GO
+PRINT 'Created or altered SP Report_ProductStockReport (returned stock now restored for stock items).';
+GO
+
+PRINT 'Section AJ complete.';
+GO
+
+-- ============================================================
+-- Section AK - restaurant.Sync_Log hygiene (Tacos support case,
+-- 2026-09-04).
+--
+-- Every upload cycle begins with restaurant.Sync_GetTimeStamp:
+-- MAX(Version) over Sync_Log filtered by EntityType/Direction/
+-- SyncStatus. The table has only its clustered PK, and each row
+-- carries the uploaded entity's full JSON, so on a busy site it
+-- grows to hundreds of MB and the scan starts exceeding the 30s
+-- SqlCommand default. The whole sync cycle then dies before
+-- uploading anything (seen on Tacos: 373MB / 50k rows, constant
+-- 'Execution Timeout Expired' at GetLastUploadTimeStamp).
+--
+-- Two measures, both idempotent:
+--  1. A covering index so the timestamp lookup stays instant
+--     no matter how large the log grows.
+--  2. Retention: remove rows older than 30 days, EXCEPT that the
+--     highest-Version Success row per (EntityType, Direction) is
+--     always kept -- that row IS the upload cursor; removing it
+--     would reset the cursor to 0 and re-upload entire tables.
+-- ============================================================
+IF OBJECT_ID('restaurant.Sync_Log', 'U') IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Sync_Log_Timestamp' AND object_id = OBJECT_ID('restaurant.Sync_Log'))
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_Sync_Log_Timestamp
+        ON [restaurant].[Sync_Log] (EntityType, Direction, SyncStatus)
+        INCLUDE ([Version]);
+    PRINT 'Created IX_Sync_Log_Timestamp.';
+END
+GO
+
+-- Deterministic one-shot of Section S's probabilistic self-cleanup, so a DB
+-- that arrives here already bloated is relieved at script time instead of
+-- waiting for the ~1-in-500 insert to fire. Same two deletes, same safety:
+-- the max-Version Success row per (EntityType, Direction) is the upload
+-- cursor and is always kept.
+IF OBJECT_ID('restaurant.Sync_Log', 'U') IS NOT NULL
+BEGIN
+    ;WITH RankedSuccess AS (
+        SELECT GuID,
+               ROW_NUMBER() OVER (
+                   PARTITION BY EntityType, Direction
+                   ORDER BY CONVERT(BIGINT, Version) DESC, SyncTime DESC
+               ) AS rn
+        FROM restaurant.Sync_Log
+        WHERE SyncStatus = 'Success'
+    )
+    DELETE SL
+    FROM restaurant.Sync_Log SL
+    INNER JOIN RankedSuccess R ON R.GuID = SL.GuID
+    WHERE R.rn > 1;
+
+    DELETE FROM restaurant.Sync_Log
+    WHERE SyncStatus = 'Failure'
+      AND SyncTime < DATEADD(DAY, -30, GETDATE());
+
+    PRINT 'Trimmed restaurant.Sync_Log (Section S retention, run deterministically).';
+END
+GO
+
+PRINT 'Section AK complete.';
 GO
