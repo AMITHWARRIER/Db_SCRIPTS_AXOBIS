@@ -2999,6 +2999,64 @@ GO
 PRINT 'Created or altered SP Section_GetAll.';
 GO
 
+-- SP: Section_Insert
+-- 2026-09-28: added here for the first time (only Sync_Section_Insert was in this script).
+-- Same gap as Section_GetAllByBranch / Sync_Section_GetAll / Section_GetAll above: @ZoneGuID
+-- was added 2025-07-30 by a one-off ALTER on ~30 DBs only; 61 DBs still had 5 params, so
+-- WebApp Section add/edit failed with "Section_Insert has too many arguments specified".
+-- Identical to defaultDB. restaurant.Section.ZoneGuid is added earlier in this script.
+CREATE OR ALTER PROCEDURE [restaurant].[Section_Insert]
+(
+	@Guid UNIQUEIDENTIFIER = NULL,
+	@Name VARCHAR(50) = NULL,
+	@ShortName VARCHAR(50) = NULL,
+	@BranchID UNIQUEIDENTIFIER = NULL,
+	@ZoneGuID UNIQUEIDENTIFIER = NULL,
+	@UpdatedUser UNIQUEIDENTIFIER = NULL
+)
+AS
+DECLARE @NewGuid UNIQUEIDENTIFIER = NULL
+BEGIN
+	IF @Guid IS NOT NULL
+	BEGIN
+		IF NOT EXISTS(SELECT * FROM restaurant.Section WHERE [Name] = @Name AND Deleted = 0 AND [Guid] != @Guid AND ZoneGuID = @ZoneGuID)
+		BEGIN
+			UPDATE restaurant.Section
+			SET [Name] = @Name, ShortName = @ShortName, ZoneGuID = @ZoneGuID,
+				UpdatedUser = @UpdatedUser, UpdatedDate = GETDATE()
+			WHERE [Guid] = @Guid;
+
+			UPDATE restaurant.SectionLocationMapping
+			SET UpdatedUser = @UpdatedUser, UpdatedDate = GETDATE()
+			WHERE BranchID = @BranchID;
+		END
+		ELSE
+			THROW 51000, 'Same data already exists...', 1;
+	END
+	ELSE
+	BEGIN
+		SET @NewGuid = NEWID();
+
+		IF NOT EXISTS(SELECT * FROM restaurant.Section WHERE [Name] = @Name AND Deleted = 0 AND ZoneGuID = @ZoneGuID)
+		BEGIN
+			INSERT INTO restaurant.Section
+			([GuID], [Name], ShortName, ZoneGuID, Deleted, CreatedUser, CreatedDate, UpdatedUser, UpdatedDate)
+			VALUES
+			(@NewGuid, @Name, @ShortName, @ZoneGuID, 0, @UpdatedUser, GETDATE(), @UpdatedUser, GETDATE());
+		END
+		ELSE
+			THROW 51000, 'Same data already exists...', 1;
+
+		INSERT INTO restaurant.SectionLocationMapping
+		(SectionID, BranchID, IsActive, CreatedUser, CreatedDate, UpdatedUser, UpdatedDate)
+		VALUES
+		(@NewGuid, @BranchID, 1, @UpdatedUser, GETDATE(), @UpdatedUser, GETDATE());
+	END
+END
+GO
+PRINT 'Created or altered SP Section_Insert.';
+GO
+
 -- SP: GetCustomerLoyaltyPoints (only in File 2 — converted to CREATE OR ALTER)
 CREATE OR ALTER PROCEDURE [dbo].[GetCustomerLoyaltyPoints]
     @CustomerID UNIQUEIDENTIFIER,
@@ -7983,6 +8041,10 @@ GO
 --    negative the stock value is treated as zero; when new stock arrives while
 --    stock is <= 0, the inflow price becomes the new WAC (the negative qty is
 --    treated as zero-stock for WAC, so old distorted values can't pollute it).
+-- 2026-10-07: @ValueOnly = 1 returns ONE result set with the report's total stock
+-- value, SUM(CURSTOCK * WAC) - the same figure the Stock Value page shows - so the
+-- P&L / Balance Sheet (via restaurant.GetStockOpeningClosing) value stock exactly
+-- like this report. The normal output (2 result sets) can't be used in INSERT...EXEC.
 CREATE OR ALTER PROCEDURE [restaurant].[Report_StockValuePaging]
 (
 	 @IsDayClosed           INT			    = NULL,
@@ -7998,7 +8060,8 @@ CREATE OR ALTER PROCEDURE [restaurant].[Report_StockValuePaging]
      @PageSize				INT             = NULL,
      @SortingColumn			VARCHAR(MAX)    = NULL,
      @SortingDirection		VARCHAR(MAX)    = NULL,
-     @BranchID				VARCHAR(MAX)	= NULL 
+     @BranchID				VARCHAR(MAX)	= NULL,
+     @ValueOnly				BIT				= 0
 	 )
 AS
 BEGIN
@@ -8041,7 +8104,7 @@ BEGIN
 IF OBJECT_ID('tempdb..#StockLedger') IS NOT NULL DROP TABLE #StockLedger;
 
 CREATE TABLE #StockLedger (
-	ID INT IDENTITY(1,1),
+	ID INT IDENTITY(1,1) PRIMARY KEY CLUSTERED,
     ProductID UNIQUEIDENTIFIER,
     BranchID UNIQUEIDENTIFIER,
     EntryDate DATETIME,
@@ -8052,41 +8115,44 @@ CREATE TABLE #StockLedger (
     Value DECIMAL(18,4),
     RunningQty DECIMAL(18,4) NULL,
     RunningValue DECIMAL(18,4) NULL,
-    WAC DECIMAL(18,4) NULL
+    WAC DECIMAL(18,4) NULL,
+    SortTime DATETIME NULL
 );
 
 -- Step 2: Populate stock-in entries
 -- Opening Stock
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+SELECT
     OPD.ProductID,
     OPM.BranchID,
     OPM.Date,
     'OPENING',
     OPD.Quantity,
     ISNULL(OPD.UnitPrice, 0),
-    OPD.Quantity * ISNULL(OPD.UnitPrice, 0)
+    OPD.Quantity * ISNULL(OPD.UnitPrice, 0),
+    OPM.CreatedDate
 FROM dbo.OpeningStockMaster OPM
 JOIN dbo.OpeningStockDetail OPD ON OPD.MasterID = OPM.GUID
 WHERE (@R_ToDate IS NULL OR OPM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR OPM.BranchID = @R_BranchID);
 
 -- Purchase
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+SELECT
     PD.ProductID,
     PR.BranchID,
     PR.EntryDate,
     'PURCHASE',
     PD.Quantity,
     ROUND(
-        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0)) 
+        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0))
         * (1 + ISNULL(PD.TaxPercentage, 0)/100.0), 4),
     -- Value = Qty * full adjusted rate
     ROUND(
         PD.Quantity *
-        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0)) 
-        * (1 + ISNULL(PD.TaxPercentage, 0)/100.0), 4)
+        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0))
+        * (1 + ISNULL(PD.TaxPercentage, 0)/100.0), 4),
+    PR.CreatedDate
 FROM restaurant.Purchase PR
 JOIN restaurant.PurchaseDetail PD ON PR.GUID = PD.MasterID
 LEFT JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PD.ProductID AND PPD.Deleted = 0 AND PPD.BranchID = @R_BranchID
@@ -8098,30 +8164,32 @@ WHERE PR.Deleted = 0
   AND (@R_BranchID IS NULL OR PR.BranchID = @R_BranchID);
 
 -- Production IN (Produced products)
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+SELECT
     PRM.ProductID,
     PRM.BranchID,
     PRM.Date,
     'PRODUCTION-IN',
     PRM.Quantity,
     ISNULL(PRM.Cost, 0),
-    PRM.Quantity * ISNULL(PRM.Cost, 0)
+    PRM.Quantity * ISNULL(PRM.Cost, 0),
+    PRM.CreatedDate
 FROM restaurant.Inv_ProductionMaster PRM
 WHERE PRM.Deleted = 0
   AND (@R_ToDate IS NULL OR PRM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR PRM.BranchID = @R_BranchID);
 
 -- Transfer In
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+SELECT
     STDTO.ProductID,
     STM.ToBranchID,
     STM.Date,
     'TRANSFER-IN',
     STDTO.Quantity,
     0,
-    0
+    0,
+    STM.CreatedDate
 FROM restaurant.Inv_StcokTransferMaster STM
 JOIN restaurant.Inv_StcokTransferDetail STDTO ON STDTO.MasterID = STM.GUID
 WHERE STM.Deleted = 0
@@ -8129,15 +8197,16 @@ WHERE STM.Deleted = 0
   AND (@R_BranchID IS NULL OR STM.BranchID = @R_BranchID);
 
 -- Adjustment IN
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+SELECT
     SAD.ProductID,
     SAM.BranchID,
     SAM.Date,
     'ADJUSTMENT-IN',
     SAD.AdjQuantity,
     0,
-    0
+    0,
+    SAM.CreatedDate
 FROM restaurant.Inv_StcokAdjustmentMaster SAM
 JOIN restaurant.Inv_StcokAdjustmentDetail SAD ON SAD.MasterID = SAM.GUID
 WHERE SAM.Deleted = 0 AND SAD.AdjQuantity > 0
@@ -8146,13 +8215,14 @@ WHERE SAM.Deleted = 0 AND SAD.AdjQuantity > 0
 
 -- Step 3: Populate stock-out entries
 -- Sales
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, SortTime)
+SELECT
     SD.ProductID,
     SM.BranchID,
     SM.INVDATE,
     'SALE',
-    SD.QTY
+    SD.QTY,
+    SM.CreatedDate
 FROM restaurant.Inv_SalesMaster SM
 JOIN restaurant.Inv_SalesDetail SD ON SD.MasterID = SM.GUID
 WHERE SM.Deleted = 0 AND SM.TransType NOT IN ('SR', 'SQ')
@@ -8160,13 +8230,14 @@ WHERE SM.Deleted = 0 AND SM.TransType NOT IN ('SR', 'SQ')
   AND (@R_BranchID IS NULL OR SM.BranchID = @R_BranchID);
 
 -- Production OUT (consumed raw material)
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, SortTime)
+SELECT
     PRD.ProductID,
     PRM.BranchID,
     PRM.Date,
     'PRODUCTION-OUT',
-    PRD.ProdQauntity
+    PRD.ProdQauntity,
+    PRM.CreatedDate
 FROM restaurant.Inv_ProductionMaster PRM
 JOIN restaurant.Inv_ProductionDetail PRD ON PRD.MasterID = PRM.GUID
 WHERE PRM.Deleted = 0
@@ -8174,13 +8245,14 @@ WHERE PRM.Deleted = 0
   AND (@R_BranchID IS NULL OR PRM.BranchID = @R_BranchID);
 
 -- Transfer OUT
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, SortTime)
+SELECT
     STDTO.ProductID,
     STM.BranchID,
     STM.Date,
     'TRANSFER-OUT',
-    STDTO.Quantity
+    STDTO.Quantity,
+    STM.CreatedDate
 FROM restaurant.Inv_StcokTransferMaster STM
 JOIN restaurant.Inv_StcokTransferDetail STDTO ON STDTO.MasterID = STM.GUID
 WHERE STM.Deleted = 0
@@ -8188,100 +8260,153 @@ WHERE STM.Deleted = 0
   AND (@R_BranchID IS NULL OR STM.BranchID = @R_BranchID);
 
 -- Adjustment OUT
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, Rate, Value, SortTime)
+SELECT
     SAD.ProductID,
     SAM.BranchID,
     SAM.Date,
     'ADJUSTMENT-OUT',
     ABS(SAD.AdjQuantity),
     0,
-    0
+    0,
+    SAM.CreatedDate
 FROM restaurant.Inv_StcokAdjustmentMaster SAM
 JOIN restaurant.Inv_StcokAdjustmentDetail SAD ON SAD.MasterID = SAM.GUID
 WHERE SAM.Deleted = 0 AND SAD.AdjQuantity < 0
   AND (@R_ToDate IS NULL OR SAM.Date < @R_ToDate)
   AND (@R_BranchID IS NULL OR SAM.BranchID = @R_BranchID);
 
+-- 2026-10-05: same-day ordering. Document dates (Purchase.EntryDate,
+-- Inv_SalesMaster.INVDATE, ...) are stored date-only (00:00), so all of a
+-- day's transactions tied and IN-before-OUT applied to every one of them: a
+-- sale made BEFORE a same-day purchase was costed at the post-purchase WAC
+-- (QA: 5@200, sell 3, 10@200, 15@250 showed WAC 225 / value 6075 instead of
+-- 227.7778 / 6150). SortTime = the header's CreatedDate (actual entry time)
+-- orders rows within a day; when that time is unknown (NULL or exactly
+-- midnight) the old rule applies - IN at the start of the day, OUT at the end.
+UPDATE #StockLedger
+SET SortTime = CASE WHEN SortTime IS NOT NULL AND CAST(SortTime AS TIME) <> '00:00:00' THEN SortTime
+                    WHEN CAST(EntryDate AS TIME) <> '00:00:00' THEN EntryDate
+                    WHEN ISNULL(InQty, 0) > 0 THEN CAST(CAST(EntryDate AS DATE) AS DATETIME)
+                    ELSE DATEADD(MS, -3, CAST(DATEADD(D, 1, CAST(EntryDate AS DATE)) AS DATETIME)) END;
+
 -- Step 4: Running WAC Calculation
-DECLARE @LoopProductID UNIQUEIDENTIFIER, @LoopBranchID UNIQUEIDENTIFIER;
-DECLARE cur CURSOR FOR
-SELECT DISTINCT ProductID, BranchID FROM #StockLedger;
+-- 2026-09-28 perf: set-based (recursive walk per product/branch) instead of a
+-- cursor per product re-scanning an un-indexed #StockLedger (~75s -> ~1s on
+-- testmeat). Same ordering, same WAC rules, same DECIMAL(18,4) rounding at
+-- every step as the old loop, so results are identical:
+--   IN  while stock <= 0 : priced inflow sets WAC; value = qty * WAC
+--   IN  while stock  > 0 : value += qty * rate; WAC = value / qty
+--   OUT                  : costed at last WAC; value = 0 once stock <= 0
+IF OBJECT_ID('tempdb..#LedgerSeq') IS NOT NULL DROP TABLE #LedgerSeq;
 
-OPEN cur;
-FETCH NEXT FROM cur INTO @LoopProductID, @LoopBranchID;
+SELECT ID,
+       DENSE_RANK() OVER (ORDER BY ProductID, BranchID) AS Grp,
+       ROW_NUMBER() OVER (PARTITION BY ProductID, BranchID
+                          ORDER BY CAST(EntryDate AS DATE) ASC,
+                                   SortTime ASC,                           -- actual entry time within the day
+                                   CASE WHEN InQty > 0 THEN 0 ELSE 1 END, -- exact tie: IN before OUT
+                                   ID ASC) AS Seq,
+       InQty, OutQty, Rate
+INTO #LedgerSeq
+FROM #StockLedger
+WHERE ProductID IS NOT NULL AND BranchID IS NOT NULL;
 
-WHILE @@FETCH_STATUS = 0
+CREATE UNIQUE CLUSTERED INDEX IX_LedgerSeq ON #LedgerSeq (Grp, Seq);
+
+IF OBJECT_ID('tempdb..#LedgerCalc') IS NOT NULL DROP TABLE #LedgerCalc;
+CREATE TABLE #LedgerCalc (ID INT PRIMARY KEY, RQ DECIMAL(18,4), RV DECIMAL(18,4), WAC DECIMAL(18,4));
+
+;WITH Walk AS (
+    -- first row of each product/branch, starting from zero stock/value/WAC
+    SELECT S.Grp, S.Seq, S.ID, N.RQ, N.RV, N.WAC
+    FROM #LedgerSeq S
+    CROSS APPLY (SELECT
+        CAST(0 AS DECIMAL(18,4)) AS RQ0,
+        CAST(0 AS DECIMAL(18,4)) AS RV0,
+        CAST(0 AS DECIMAL(18,4)) AS WAC0) P
+    CROSS APPLY (SELECT
+        CASE WHEN ISNULL(S.InQty, 0) > 0 AND P.RQ0 <= 0
+             THEN CAST(CASE WHEN ISNULL(S.Rate, 0) > 0 THEN S.Rate ELSE P.WAC0 END AS DECIMAL(18,4))
+             WHEN ISNULL(S.InQty, 0) > 0
+             THEN CAST(CAST(P.RV0 + S.InQty * ISNULL(S.Rate, 0) AS DECIMAL(18,4)) / NULLIF(CAST(P.RQ0 + S.InQty AS DECIMAL(18,4)), 0) AS DECIMAL(18,4))
+             ELSE P.WAC0 END AS WAC1,
+        CAST(CASE WHEN ISNULL(S.InQty, 0) > 0 THEN P.RQ0 + S.InQty ELSE P.RQ0 - ISNULL(S.OutQty, 0) END AS DECIMAL(18,4)) AS RQ1) A
+    CROSS APPLY (SELECT
+        A.RQ1 AS RQ,
+        CAST(CASE WHEN ISNULL(S.InQty, 0) > 0 AND P.RQ0 <= 0
+                  THEN CASE WHEN A.RQ1 > 0 THEN A.RQ1 * A.WAC1 ELSE 0 END
+                  WHEN ISNULL(S.InQty, 0) > 0
+                  THEN P.RV0 + S.InQty * ISNULL(S.Rate, 0)
+                  ELSE CASE WHEN A.RQ1 <= 0 THEN 0 ELSE P.RV0 - ISNULL(S.OutQty, 0) * ISNULL(P.WAC0, 0) END
+             END AS DECIMAL(18,4)) AS RV,
+        A.WAC1 AS WAC) N
+    WHERE S.Seq = 1
+
+    UNION ALL
+
+    -- next row: apply the same rules to the previous row's running state
+    SELECT S.Grp, S.Seq, S.ID, N.RQ, N.RV, N.WAC
+    FROM Walk P
+    JOIN #LedgerSeq S ON S.Grp = P.Grp AND S.Seq = P.Seq + 1
+    CROSS APPLY (SELECT
+        CASE WHEN ISNULL(S.InQty, 0) > 0 AND P.RQ <= 0
+             THEN CAST(CASE WHEN ISNULL(S.Rate, 0) > 0 THEN S.Rate ELSE P.WAC END AS DECIMAL(18,4))
+             WHEN ISNULL(S.InQty, 0) > 0
+             THEN CAST(CAST(P.RV + S.InQty * ISNULL(S.Rate, 0) AS DECIMAL(18,4)) / NULLIF(CAST(P.RQ + S.InQty AS DECIMAL(18,4)), 0) AS DECIMAL(18,4))
+             ELSE P.WAC END AS WAC1,
+        CAST(CASE WHEN ISNULL(S.InQty, 0) > 0 THEN P.RQ + S.InQty ELSE P.RQ - ISNULL(S.OutQty, 0) END AS DECIMAL(18,4)) AS RQ1) A
+    CROSS APPLY (SELECT
+        A.RQ1 AS RQ,
+        CAST(CASE WHEN ISNULL(S.InQty, 0) > 0 AND P.RQ <= 0
+                  THEN CASE WHEN A.RQ1 > 0 THEN A.RQ1 * A.WAC1 ELSE 0 END
+                  WHEN ISNULL(S.InQty, 0) > 0
+                  THEN P.RV + S.InQty * ISNULL(S.Rate, 0)
+                  ELSE CASE WHEN A.RQ1 <= 0 THEN 0 ELSE P.RV - ISNULL(S.OutQty, 0) * ISNULL(P.WAC, 0) END
+             END AS DECIMAL(18,4)) AS RV,
+        A.WAC1 AS WAC) N
+)
+INSERT INTO #LedgerCalc (ID, RQ, RV, WAC)
+SELECT ID, RQ, RV, WAC FROM Walk
+OPTION (MAXRECURSION 0);
+
+UPDATE L
+SET RunningQty = C.RQ, RunningValue = C.RV, WAC = C.WAC
+FROM #StockLedger L
+JOIN #LedgerCalc C ON C.ID = L.ID;
+
+DROP TABLE IF EXISTS #LedgerSeq;
+DROP TABLE IF EXISTS #LedgerCalc;
+
+-- Step 5a: total value only (final accounts). Same last-row pick and the same
+-- Product/Branch joins as Step 5, so it equals the Stock Value page's total.
+-- Zero/negative stock is valued at 0 (same rule as the WAC walk and the page).
+IF @ValueOnly = 1
 BEGIN
-    DECLARE @RQ DECIMAL(18,4) = 0;
-    DECLARE @RV DECIMAL(18,4) = 0;
-    DECLARE @WAC DECIMAL(18,4) = 0;
+    ;WITH FinalStock AS (
+        SELECT ProductID, BranchID, RunningQty, WAC,
+               ROW_NUMBER() OVER (PARTITION BY ProductID, BranchID
+                                  ORDER BY CAST(EntryDate AS DATE) DESC, SortTime DESC,
+                                           CASE WHEN InQty > 0 THEN 0 ELSE 1 END DESC, ID DESC) AS rn
+        FROM #StockLedger
+    )
+    SELECT StockValue = ISNULL(SUM(CASE WHEN FS.RunningQty > 0 THEN FS.RunningQty * ISNULL(FS.WAC, 0) ELSE 0 END), 0)
+    FROM FinalStock FS
+    JOIN restaurant.Product P ON FS.ProductID = P.GuID
+    JOIN dbo.R_Branch B ON FS.BranchID = B.GuID
+    WHERE FS.rn = 1;
 
-    DECLARE @ID INT, @InQty DECIMAL(18,4), @OutQty DECIMAL(18,4), @Rate DECIMAL(18,4);
-
-    DECLARE ledger_cursor CURSOR FOR
-    SELECT ID, InQty, OutQty, Rate
-    FROM #StockLedger
-    WHERE ProductID = @LoopProductID AND BranchID = @LoopBranchID
-    ORDER BY EntryDate ASC, 
-         CASE WHEN InQty > 0 THEN 0 ELSE 1 END, -- process IN before OUT on same day
-         ID ASC;
-
-
-    OPEN ledger_cursor;
-    FETCH NEXT FROM ledger_cursor INTO @ID, @InQty, @OutQty, @Rate;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        IF ISNULL(@InQty, 0) > 0
-        BEGIN
-            IF @RQ <= 0
-            BEGIN
-                -- Stock is zero/negative: treat it as zero for WAC, so this
-                -- inflow's price becomes the new WAC (an unpriced inflow such
-                -- as a transfer keeps the last WAC instead of zeroing it).
-                IF ISNULL(@Rate, 0) > 0
-                    SET @WAC = @Rate;
-                SET @RQ = @RQ + @InQty;
-                SET @RV = CASE WHEN @RQ > 0 THEN @RQ * @WAC ELSE 0 END;
-            END
-            ELSE
-            BEGIN
-                SET @RV = @RV + @InQty * ISNULL(@Rate, 0);
-                SET @RQ = @RQ + @InQty;
-                SET @WAC = @RV / NULLIF(@RQ, 0);
-            END
-        END
-        ELSE
-        BEGIN
-            -- Outflow is always costed at the last known WAC; the WAC itself
-            -- never changes on an outflow. Negative stock carries no value.
-            SET @RQ = @RQ - ISNULL(@OutQty, 0);
-            SET @RV = @RV - ISNULL(@OutQty, 0) * ISNULL(@WAC, 0);
-            IF @RQ <= 0
-                SET @RV = 0;
-        END
-
-        UPDATE #StockLedger
-        SET RunningQty = @RQ, RunningValue = @RV, WAC = @WAC
-        WHERE ID = @ID;
-
-        FETCH NEXT FROM ledger_cursor INTO @ID, @InQty, @OutQty, @Rate;
-    END
-
-    CLOSE ledger_cursor;
-    DEALLOCATE ledger_cursor;
-
-    FETCH NEXT FROM cur INTO @LoopProductID, @LoopBranchID;
+    DROP TABLE IF EXISTS #StockLedger;
+    RETURN;
 END
-
-CLOSE cur;
-DEALLOCATE cur;
 
 -- Step 5: Summary Output
 ;WITH FinalStock AS (
     SELECT *,
-           ROW_NUMBER() OVER (PARTITION BY ProductID, BranchID ORDER BY EntryDate DESC, ID DESC) AS rn
+           -- reverse of the WAC walk's order, so rn = 1 is the row the walk ended on
+           ROW_NUMBER() OVER (PARTITION BY ProductID, BranchID
+                              ORDER BY CAST(EntryDate AS DATE) DESC, SortTime DESC,
+                                       CASE WHEN InQty > 0 THEN 0 ELSE 1 END DESC, ID DESC) AS rn
     FROM #StockLedger
 )
 SELECT 
@@ -8321,7 +8446,9 @@ GROUP BY P.GuID, P.Name, B.Name, C.Name, T.Name, FS.RunningQty, FS.WAC
 ORDER BY P.Name, B.Name
 
 
-		SELECT ''AS Product,
+		-- 2026-09-28 perf: footer placeholder only - API needs the result set to exist,
+		-- not one blank row per ledger row (was ~34k rows on testmeat).
+		SELECT TOP 1 ''AS Product,
 		       ''AS [Group],
 			   ''AS [Category],
 			    
@@ -8349,133 +8476,15 @@ GO
 PRINT 'Created or altered restaurant.Report_StockValuePaging.';
 GO
 
--- Stored Procedure: StockLedger_WithWAC
--- Purpose: Generate a detailed stock ledger with Perpetual Weighted Average Cost (WAC) per transaction
-
-CREATE OR ALTER PROCEDURE [restaurant].[StockLedger_WithWAC]
-(
-    @FromDate DATE = NULL,
-    @ToDate DATE = NULL,
-    @ProductID UNIQUEIDENTIFIER = NULL,
-    @BranchID UNIQUEIDENTIFIER = NULL
-)
-AS
-BEGIN
-    SET NOCOUNT ON;
-    SET ARITHABORT ON;
-    SET XACT_ABORT ON;
-
-    IF OBJECT_ID('tempdb..#StockLedger') IS NOT NULL DROP TABLE #StockLedger;
-
-    CREATE TABLE #StockLedger (
-        RowID INT IDENTITY(1,1),
-        ProductID UNIQUEIDENTIFIER,
-        BranchID UNIQUEIDENTIFIER,
-        EntryDate DATETIME,
-        RefNo NVARCHAR(100),
-        MovementType VARCHAR(10), -- IN or OUT
-        Quantity DECIMAL(18, 4),
-        UnitCost DECIMAL(18, 4),
-        TotalCost DECIMAL(18, 4),
-        RunningStock DECIMAL(18, 4),
-        RunningCost DECIMAL(18, 4),
-        WAC DECIMAL(18, 4)
-    );
-
-    -- Insert transactions: Purchases
-    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, RefNo, MovementType, Quantity, UnitCost, TotalCost)
-    SELECT PD.ProductID, PR.BranchID, PR.EntryDate, PR.EntryNumber, 'IN', PD.Quantity,
-           ISNULL(PD.Rate, 0), ISNULL(PD.Rate, 0) * PD.Quantity
-    FROM restaurant.Purchase PR
-    JOIN restaurant.PurchaseDetail PD ON PD.MasterID = PR.GuID
-    WHERE PR.Deleted = 0 AND PR.ReferenceType = 0
-      AND (@FromDate IS NULL OR PR.EntryDate >= @FromDate)
-      AND (@ToDate IS NULL OR PR.EntryDate < DATEADD(DAY, 1, @ToDate))
-      AND (@BranchID IS NULL OR PR.BranchID = @BranchID)
-      AND (@ProductID IS NULL OR PD.ProductID = @ProductID);
-
-    -- Insert transactions: Sales
-    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, RefNo, MovementType, Quantity, UnitCost, TotalCost)
-    SELECT SD.ProductID, SM.BranchID, SM.INVDATE, SM.EntryNumber, 'OUT', SD.QTY,
-           0, 0
-    FROM restaurant.Inv_SalesMaster SM
-    JOIN restaurant.Inv_SalesDetail SD ON SD.MasterID = SM.GuID
-    WHERE SM.Deleted = 0
-      AND (@FromDate IS NULL OR SM.INVDATE >= @FromDate)
-      AND (@ToDate IS NULL OR SM.INVDATE < DATEADD(DAY, 1, @ToDate))
-      AND (@BranchID IS NULL OR SM.BranchID = @BranchID)
-      AND (@ProductID IS NULL OR SD.ProductID = @ProductID);
-
-    -- Additional transactions like Adjustment, Transfers can be added similarly
-
-    -- Recalculate WAC
-    DECLARE @LoopProductID UNIQUEIDENTIFIER;
-    DECLARE ProductCursor CURSOR FOR SELECT DISTINCT ProductID FROM #StockLedger;
-    OPEN ProductCursor;
-    FETCH NEXT FROM ProductCursor INTO @LoopProductID;
-
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        DECLARE @CurrentStock DECIMAL(18, 4) = 0,
-                @CurrentCost DECIMAL(18, 4) = 0,
-                @WAC DECIMAL(18, 4) = 0,
-                @RowID INT,
-                @Qty DECIMAL(18,4),
-                @Cost DECIMAL(18,4),
-                @MoveType VARCHAR(10);
-
-        DECLARE RowCursor CURSOR FOR
-        SELECT RowID, Quantity, UnitCost, MovementType
-        FROM #StockLedger
-        WHERE ProductID = @LoopProductID
-        ORDER BY EntryDate, RowID;
-
-        OPEN RowCursor;
-        FETCH NEXT FROM RowCursor INTO @RowID, @Qty, @Cost, @MoveType;
-
-        WHILE @@FETCH_STATUS = 0
-        BEGIN
-            IF @MoveType = 'IN'
-            BEGIN
-                SET @CurrentCost += (@Qty * @Cost);
-                SET @CurrentStock += @Qty;
-                IF @CurrentStock > 0 SET @WAC = @CurrentCost / @CurrentStock;
-            END
-            ELSE
-            BEGIN
-                SET @CurrentCost -= (@Qty * @WAC);
-                SET @CurrentStock -= @Qty;
-                IF @CurrentStock < 0 SET @CurrentStock = 0;
-            END
-
-            UPDATE #StockLedger
-            SET 
-                RunningStock = @CurrentStock,
-                RunningCost = @CurrentCost,
-                WAC = @WAC,
-                UnitCost = CASE WHEN @MoveType = 'OUT' THEN @WAC ELSE UnitCost END,
-                TotalCost = CASE WHEN @MoveType = 'OUT' THEN @Qty * @WAC ELSE TotalCost END
-            WHERE RowID = @RowID;
-
-            FETCH NEXT FROM RowCursor INTO @RowID, @Qty, @Cost, @MoveType;
-        END
-
-        CLOSE RowCursor;
-        DEALLOCATE RowCursor;
-        FETCH NEXT FROM ProductCursor INTO @LoopProductID;
-    END
-
-    CLOSE ProductCursor;
-    DEALLOCATE ProductCursor;
-
-    -- Output
-    SELECT * FROM #StockLedger ORDER BY ProductID, EntryDate, RowID;
-
-    DROP TABLE #StockLedger;
-END
-
+-- 2026-10-05: restaurant.StockLedger_WithWAC removed. It was an unused early
+-- WAC prototype (purchases + sales only, no branch split, its own WAC rules)
+-- that disagreed with Report_StockValuePaging / Update_WAC_ForProduct.
+-- Verified before removal: no reference in WebAPI/WinApp/TabAPI/Flutter/web
+-- source, no SQL object calling it in any of the 114 DBs on the server, and
+-- no execution recorded since the 2026-09-20 server restart.
+DROP PROCEDURE IF EXISTS [restaurant].[StockLedger_WithWAC];
 GO
-PRINT 'Created or altered restaurant.StockLedger_WithWAC.';
+PRINT 'Dropped restaurant.StockLedger_WithWAC (unused).';
 GO
 
 CREATE OR ALTER PROCEDURE [restaurant].[Sync_INVProductionBOQ_Insert]    
@@ -8617,41 +8626,44 @@ BEGIN
         Value DECIMAL(18,4),
         RunningQty DECIMAL(18,4) NULL,
         RunningValue DECIMAL(18,4) NULL,
-        WAC DECIMAL(18,4) NULL
+        WAC DECIMAL(18,4) NULL,
+        SortTime DATETIME NULL
     );
 
     -- Step 2: Populate Inward and Outward stock data for this product only
 
     -- Opening Stock
-    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-    SELECT 
+    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+    SELECT
         OPD.ProductID,
         OPM.BranchID,
         OPM.Date,
         'OPENING',
         OPD.Quantity,
         ISNULL(OPD.UnitPrice, 0),
-        OPD.Quantity * ISNULL(OPD.UnitPrice, 0)
+        OPD.Quantity * ISNULL(OPD.UnitPrice, 0),
+        OPM.CreatedDate
     FROM dbo.OpeningStockMaster OPM
     JOIN dbo.OpeningStockDetail OPD ON OPD.MasterID = OPM.GUID
     WHERE OPD.ProductID = @ProductID AND OPM.BranchID = @BranchID;
 
     -- Purchase
-INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-SELECT 
+INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+SELECT
     PD.ProductID,
     PR.BranchID,
     PR.EntryDate,
     'PURCHASE',
     PD.Quantity,
     ROUND(
-        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0)) 
+        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0))
         * (1 + ISNULL(PD.TaxPercentage, 0)/100.0), 4),
     -- Value = Qty * full adjusted rate
     ROUND(
         PD.Quantity *
-        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0)) 
-        * (1 + ISNULL(PD.TaxPercentage, 0)/100.0), 4)
+        (ISNULL(PD.Rate, ISNULL(PPD.Cost, 0)) * (1 - ISNULL(PD.DiscPercentage, 0)/100.0))
+        * (1 + ISNULL(PD.TaxPercentage, 0)/100.0), 4),
+    PR.CreatedDate
 FROM restaurant.Purchase PR
 JOIN restaurant.PurchaseDetail PD ON PR.GUID = PD.MasterID
 LEFT JOIN restaurant.ProductPriceDetail PPD ON PPD.MasterID = PD.ProductID AND PPD.Deleted = 0
@@ -8659,41 +8671,53 @@ WHERE PD.ProductID = @ProductID AND PR.BranchID = @BranchID AND PR.Deleted = 0 A
 
 
     -- Production IN
-    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value)
-    SELECT 
+    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, InQty, Rate, Value, SortTime)
+    SELECT
         PRM.ProductID,
         PRM.BranchID,
         PRM.Date,
         'PRODUCTION-IN',
         PRM.Quantity,
         ISNULL(PRM.Cost, 0),
-        PRM.Quantity * ISNULL(PRM.Cost, 0)
+        PRM.Quantity * ISNULL(PRM.Cost, 0),
+        PRM.CreatedDate
     FROM restaurant.Inv_ProductionMaster PRM
     WHERE PRM.ProductID = @ProductID AND PRM.BranchID = @BranchID AND PRM.Deleted = 0;
 
     -- Sales
-    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty)
-    SELECT 
+    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, SortTime)
+    SELECT
         SD.ProductID,
         SM.BranchID,
         SM.INVDATE,
         'SALE',
-        SD.QTY
+        SD.QTY,
+        SM.CreatedDate
     FROM restaurant.Inv_SalesMaster SM
     JOIN restaurant.Inv_SalesDetail SD ON SD.MasterID = SM.GUID
     WHERE SD.ProductID = @ProductID AND SM.BranchID = @BranchID AND SM.Deleted = 0;
 
     -- Production OUT
-    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty)
-    SELECT 
+    INSERT INTO #StockLedger (ProductID, BranchID, EntryDate, TransType, OutQty, SortTime)
+    SELECT
         PRD.ProductID,
         PRM.BranchID,
         PRM.Date,
         'PRODUCTION-OUT',
-        PRD.ProdQauntity
+        PRD.ProdQauntity,
+        PRM.CreatedDate
     FROM restaurant.Inv_ProductionMaster PRM
     JOIN restaurant.Inv_ProductionDetail PRD ON PRD.MasterID = PRM.GUID
     WHERE PRD.ProductID = @ProductID AND PRM.BranchID = @BranchID AND PRM.Deleted = 0;
+
+    -- 2026-10-05: same-day ordering - see Report_StockValuePaging. SortTime =
+    -- header CreatedDate (actual entry time); unknown (NULL/midnight) falls
+    -- back to IN at the start of the day, OUT at the end.
+    UPDATE #StockLedger
+    SET SortTime = CASE WHEN SortTime IS NOT NULL AND CAST(SortTime AS TIME) <> '00:00:00' THEN SortTime
+                        WHEN CAST(EntryDate AS TIME) <> '00:00:00' THEN EntryDate
+                        WHEN ISNULL(InQty, 0) > 0 THEN CAST(CAST(EntryDate AS DATE) AS DATETIME)
+                        ELSE DATEADD(MS, -3, CAST(DATEADD(D, 1, CAST(EntryDate AS DATE)) AS DATETIME)) END;
 
    -- Step 3: Calculate Running WAC with Negative Stock Handling
 DECLARE @RQ DECIMAL(18,4) = 0;  -- Running Quantity
@@ -8708,8 +8732,9 @@ DECLARE @ID INT,
 DECLARE ledger_cursor CURSOR FOR
 SELECT ID, InQty, OutQty, Rate
 FROM #StockLedger
-ORDER BY EntryDate ASC, 
-         CASE WHEN InQty > 0 THEN 0 ELSE 1 END, -- IN before OUT
+ORDER BY CAST(EntryDate AS DATE) ASC,
+         SortTime ASC,                           -- actual entry time within the day
+         CASE WHEN InQty > 0 THEN 0 ELSE 1 END, -- exact tie: IN before OUT
          ID ASC;
 
 OPEN ledger_cursor;
@@ -8762,7 +8787,8 @@ DEALLOCATE ledger_cursor;
 
     SELECT TOP 1 @LatestWAC = WAC
     FROM #StockLedger
-    ORDER BY EntryDate DESC, ID DESC;
+    ORDER BY CAST(EntryDate AS DATE) DESC, SortTime DESC,
+             CASE WHEN InQty > 0 THEN 0 ELSE 1 END DESC, ID DESC;
 
     IF @LatestWAC IS NOT NULL
     BEGIN
@@ -15199,4 +15225,955 @@ END
 GO
 
 PRINT 'Section AK complete.';
+GO
+
+-- ============================================================
+-- Section AL - restaurant.InsertProductionData: only count the
+-- bills this day close actually closes (2026-10-06).
+--
+-- Day close calls this with @Date = the date being closed, but it
+-- read EVERY row of R_SalesDetail. With AllowDCPendingBillAutoMove
+-- on, still-open bills are only re-dated to the next day - they stay
+-- in R_SalesMaster/R_SalesDetail (usp_TransferDataToTempTable only
+-- moves IsPending = 0 bills of @ClosingDate) - so their items were
+-- counted in today's production (stamped today) and again at the
+-- next day close (stamped tomorrow). Filtered now with the same
+-- condition the transfer uses, so each bill is produced exactly once,
+-- on the date it is closed.
+--
+-- This proc was never in this script, so two versions drifted apart
+-- on customer DBs (no product filter vs. R_Product.TypeID = 'Live').
+-- This one is the defaultDB version + the bill filter + wastage applied
+-- as a percentage (was 1 + pct, i.e. 50% wastage multiplied by 51). Product scope
+-- is unchanged ('Live' is the default type of practically every
+-- sellable product). The CATCH now re-raises instead of returning a
+-- result set nobody reads - frmDailyClosing.ProductionProcess already
+-- catches it, logs to dayclose_production_error.txt and lets the day
+-- close continue, so failures become visible without blocking anything.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [restaurant].[InsertProductionData]
+    @BranchID uniqueidentifier,
+    @CreatedUser uniqueidentifier,
+    @EntryNo nvarchar(50) = NULL,  -- Optional
+    @Date datetime
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        DECLARE @InsertedMasterGuID TABLE (GuID uniqueidentifier, ProductID uniqueidentifier, Quantity decimal(18, 3));
+
+        INSERT INTO restaurant.Inv_ProductionMaster
+        (
+            GuID, Date, Quantity, ProductID, BranchID, Cost, Unit, Deleted,
+            CreatedUser, CreatedDate, UpdatedUser, UpdatedDate, EntryNo
+        )
+        OUTPUT inserted.GuID, inserted.ProductID, inserted.Quantity
+        INTO @InsertedMasterGuID(GuID, ProductID, Quantity)
+        SELECT
+            NEWID(),
+            @Date,
+            SUM(RSD.Quantity),
+            RSD.ProductID,
+            @BranchID,
+            0,
+            RSD.UnitID,
+            0,
+            @CreatedUser,
+            GETDATE(),
+            @CreatedUser,
+            GETDATE(),
+            CONCAT('WD-', FORMAT(ISNULL(MAX(RSD.ID), 0) + 1, 'D5'))
+        FROM R_SalesDetail RSD
+        INNER JOIN R_SalesMaster RSM
+            ON RSM.GuID = RSD.MasterID
+           AND RSM.IsPending = 0
+           AND CAST(RSM.TransactionDate AS DATE) = CAST(@Date AS DATE)
+        INNER JOIN R_Product RP
+            ON RP.GuID = RSD.ProductID
+           AND RP.TypeID = '55769654-3AA1-45B7-8D76-3483A878B3A9'
+        GROUP BY RSD.ProductID, RSD.UnitID;
+
+        IF EXISTS (SELECT 1 FROM @InsertedMasterGuID)
+        BEGIN
+            INSERT INTO restaurant.Inv_ProductionDetail
+            (
+                GuID, MasterID, ProductID, ProdQauntity, Deleted, Cost, Unit
+            )
+            SELECT
+                NEWID(),
+                Master.GuID,
+                BOQ.ProductID,
+                -- WastagePercentage is a percent (e.g. 5 = 5%), so 1 + pct/100. Was
+                -- (1 + pct), which multiplied a 5% wastage line by 6.
+                ((BOQ.Quantity / PBM.Totalqty) * Master.Quantity) * (1 + ISNULL(BOQ.WastagePercentage, 0) / 100.0),
+                0,
+                BOQ.Cost,
+                BOQ.UnitId
+            FROM restaurant.Inv_ProductBOQDetail BOQ
+            INNER JOIN restaurant.Inv_ProductBOQMaster PBM
+                ON PBM.GuID = BOQ.MasterID
+            INNER JOIN @InsertedMasterGuID Master
+                ON PBM.ProductID = Master.ProductID
+        END
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        DECLARE @ErrorSeverity INT = ERROR_SEVERITY();
+        DECLARE @ErrorState INT = ERROR_STATE();
+        RAISERROR(@ErrorMessage, @ErrorSeverity, @ErrorState);
+    END CATCH
+END
+GO
+
+-- Production upload read (ProductionProcessSyncHandler, now also run by both autosync
+-- services when Settings 'IsBOQEnabled' is on). Previously returned Version as raw
+-- rowversion (so the handler never read it and its upload watermark stayed 0, re-sending
+-- the whole table every sync) and returned EVERY detail row on every call. Now: Version
+-- as BIGINT, oldest-first in batches of 2000 so a large first upload is spread over
+-- several cycles instead of timing out, and only the details of the masters returned.
+CREATE OR ALTER PROCEDURE [restaurant].[sp_GetAllProductionProcessDetail]
+    @Version BIGINT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT TOP (2000)
+        PM.[ID], PM.[GuID], PM.[Date], PM.[Quantity], PM.[ProductID], PM.[BranchID], PM.[Cost],
+        PM.[Unit], PM.[Deleted], PM.[CreatedUser], PM.[CreatedDate], PM.[UpdatedUser],
+        PM.[UpdatedDate], PM.[EntryNo], CONVERT(BIGINT, PM.[Version]) AS [Version]
+    INTO #Masters
+    FROM [restaurant].[Inv_ProductionMaster] PM
+    WHERE CONVERT(BIGINT, PM.[Version]) > ISNULL(@Version, 0)
+    ORDER BY PM.[Version];
+
+    SELECT * FROM #Masters ORDER BY [Version];
+
+    SELECT PD.[ID], PD.[GuID], PD.[MasterID], PD.[ProductID], PD.[ProdQauntity], PD.[Deleted], PD.[Cost], PD.[Unit]
+    FROM [restaurant].[Inv_ProductionDetail] PD
+    INNER JOIN #Masters M ON M.[GuID] = PD.[MasterID];
+END
+GO
+
+-- BOQ setting row (web: Settings > Day Close > Enable BOQ, Setting.EnableBOQ <-> key
+-- IsBOQEnabled). Created here so it exists in R_Settings and shows in the Windows
+-- Settings screen even if the settings download from web has not run or was incomplete.
+-- Default 'False' (BOQ off); an existing row - downloaded or set by hand - is never changed.
+IF OBJECT_ID('dbo.R_Settings', 'U') IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM dbo.R_Settings WHERE LTRIM(RTRIM([Key])) = 'IsBOQEnabled')
+BEGIN
+    INSERT INTO dbo.R_Settings ([Key], [Value]) VALUES ('IsBOQEnabled', 'False');
+    PRINT 'Added R_Settings.IsBOQEnabled = False.';
+END
+ELSE
+    PRINT 'R_Settings.IsBOQEnabled already exists (or no R_Settings table) - left unchanged.';
+GO
+
+PRINT 'Section AL complete.';
+GO
+
+-- =============================================================================
+-- Section AM (2026-10-07): Final accounts stock = Stock Value report (WAC).
+-- P&L opening/closing stock and Balance Sheet closing stock used dbo.GetStockValue,
+-- which takes sales out at SELLING price, so they never matched the Stock Value
+-- report. restaurant.GetStockOpeningClosing (first written 2025-09-01 on test9 but
+-- never scripted or wired into the API) returns both figures from
+-- Report_StockValuePaging @ValueOnly = 1, i.e. SUM(CURSTOCK * WAC) as on a date.
+--   Opening = stock as on @FromDate - 1 (0 when @FromDate is NULL)
+--   Closing = stock as on @ToDate (ToDate's own transactions included)
+--   @BranchID NULL = all branches (GetStockValue returned 0 in that case).
+-- =============================================================================
+PRINT 'Section AM: Final accounts stock value from WAC...';
+GO
+
+CREATE OR ALTER PROCEDURE [restaurant].[GetStockOpeningClosing]
+(
+    @FromDate    DATE             = NULL,
+    @ToDate      DATE,
+    @BranchID    UNIQUEIDENTIFIER = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Branch VARCHAR(MAX) = CONVERT(VARCHAR(36), @BranchID);
+    DECLARE @OpeningToDate DATE = DATEADD(DAY, -1, @FromDate);
+    DECLARE @Value TABLE (StockValue DECIMAL(38, 8));
+    DECLARE @Opening DECIMAL(38, 8) = 0;
+    DECLARE @Closing DECIMAL(38, 8) = 0;
+
+    IF @FromDate IS NOT NULL
+    BEGIN
+        INSERT INTO @Value
+        EXEC [restaurant].[Report_StockValuePaging] @ToDate = @OpeningToDate, @BranchID = @Branch, @ValueOnly = 1;
+
+        SELECT @Opening = ISNULL(SUM(StockValue), 0) FROM @Value;
+        DELETE FROM @Value;
+    END
+
+    INSERT INTO @Value
+    EXEC [restaurant].[Report_StockValuePaging] @ToDate = @ToDate, @BranchID = @Branch, @ValueOnly = 1;
+
+    SELECT @Closing = ISNULL(SUM(StockValue), 0) FROM @Value;
+
+    SELECT OpeningStockValue = CONVERT(DECIMAL(18, 4), ROUND(@Opening, 4)),
+           ClosingStockValue = CONVERT(DECIMAL(18, 4), ROUND(@Closing, 4));
+END
+GO
+
+PRINT 'Section AM complete.';
+GO
+
+-- ============================================================
+-- Section AN (2026-10-14): Complimentary Report for the web app.
+--
+-- Complimentary bills were already classified by the existing
+-- SalesStatus report proc (IsComplementary = 1 -> 'Complementary',
+-- enum value 6), so the web report reuses that endpoint and only
+-- needs two things here:
+--
+-- 1. Report_SalesStatusReportPaging returned CancelReason as the
+--    Reason for every bill. The reason typed at complimentary time
+--    lives in ComplimentaryReason (added in the Kashkan Phase 2
+--    section near the top of this script and carried through sync
+--    by Section AA), so for complimentary bills Reason now prefers
+--    that column. Every other status is unchanged. The body is
+--    otherwise the live defaultDB / testmeat definition verbatim.
+--
+-- 2. A WebMenu row 'Complimentary Report' under POS SALES plus the
+--    System user type's permission, resolved the same way as
+--    Section AH (parent by contents, fixed GuID, no hardcoded IDs).
+-- ============================================================
+
+PRINT 'Section AN: Complimentary Report...';
+GO
+CREATE OR ALTER PROCEDURE [restaurant].[Report_SalesStatusReportPaging]
+(
+ @IsDayClosed      INT		    = NULL,
+ @CounterID        VARCHAR(MAX) = NULL,
+ @SectionID        VARCHAR(MAX) = NULL,
+ @UserID           VARCHAR(MAX) = NULL,
+ @PaymentType      VARCHAR(MAX) = NULL,
+ @PaymentCardID    VARCHAR(MAX) = NULL,
+ @FromDate         DATE		    = NULL,
+ @ToDate           DATE		    = NULL,
+ @StatusType       VARCHAR(MAX) = NULL,
+ @PageNumber	   INT          = NULL,
+ @PageSize		   INT          = NULL,
+ @SortingColumn	   VARCHAR(MAX) = NULL,
+ @SortingDirection VARCHAR(MAX) = NULL,
+ @BranchID				 VARCHAR(MAX) = NULL
+ --@FinYearID    VARCHAR(MAX) = NULL,
+ --@BranchID     VARCHAR(MAX) = NULL
+ )
+AS
+BEGIN
+---RE DECLARING---
+	DECLARE 
+	     @R_IsDayClosed      INT				 = @IsDayClosed,
+		 @R_CounterID        VARCHAR(MAX)		 = @CounterID,
+		 @R_SectionID        VARCHAR(MAX)		 = @SectionID,
+		 @R_UserID           VARCHAR(MAX)		 = @UserID,
+		 @R_PaymentType      VARCHAR(MAX)		 = @PaymentType,
+		 @R_PaymentCardID    VARCHAR(MAX)		 = @PaymentCardID,
+		 @R_FromDate         DATE				 = @FromDate,
+		 @R_ToDate           DATE				 = @ToDate,
+		 @R_StatusType       VARCHAR(MAX)		 = @StatusType,
+         @VatEnabled		 BIT = (Select CASE WHEN Value = 'True' THEN 1 ELSE 0 END AS Value from R_Settings where [Key] = 'IsVATEnabled'),
+		 @R_PageNumber		 INT				 = @PageNumber,
+         @R_PageSize		 INT				 = @PageSize,
+         @R_SortingColumn    VARCHAR(MAX)        = @SortingColumn,
+         @R_SortingDirection VARCHAR(MAX)        = @SortingDirection,
+		 @R_BranchID        VARCHAR(MAX)		 = @BranchID 
+
+		 DECLARE @SortingCmd VARCHAR(MAX)
+        
+
+	SET ARITHABORT ON
+	SET XACT_ABORT ON
+
+	SET NOCOUNT ON
+
+	
+	SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#SalesStatusReport') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesStatusReport
+	END
+
+	IF Object_id('TempDB.dbo.#SalesStatusReportCount') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesStatusReportCount
+	END
+	------BEGIN SELECT FOR SALES REPORT-----
+	SELECT *
+	INTO #SalesStatusReport
+	FROM 
+	(
+		 SELECT SM.[No],SM.BillNo BillNo,SM.TransactionDate, SM.BillTime AS BillDate,SM.BillTime AS BillTime
+		,CASE WHEN [Card]>0.00  THEN 'Card' 
+			  WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None' 
+			  ELSE 'Cash' END AS PaymentType
+	   ,CASE WHEN CardID IS NOT NULL THEN PC.CardName
+			WHEN CardID IS NULL AND [Card]<>0.00 THEN 'Card' 
+			ELSE 'Cash' END AS PaymenCardType
+		,SM.RTotal AS RateTotal
+		,CASE WHEN @VatEnabled = 0 THEN 0 ELSE SM.Tax  END AS VatAmount
+		,CASE WHEN @VatEnabled = 1 THEN 0 ELSE SM.Tax END AS TaxAmount
+		,(SM.Discount+ISNULL(SM.ProdDiscount,0)) [Discount]
+		,SM.RoundOff RoundOff
+		,((SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff))+ISNULL(DelAmount+ContAmount+OtherAmount,0) NetTotal
+		,SM.Cash AS [Cash]
+		,SM.[Card]AS [Card],C.Name [Counter], S.Name Section, B.Name AS Branch 
+		,U.Name AS [User]
+		,CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+				WHEN Refund = 1 THEN 'Refund'
+				WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+				WHEN SM.Merged = 1 THEN 'Merged'
+				WHEN IsComplementary = 1 THEN 'Complementary' 
+				WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0 AND IsComplementary = 0  THEN 'Completed'
+				ELSE 'RunningOrder' END AS [SalesStatus]
+		,CASE WHEN ISNULL(SM.IsComplementary,0) = 1 AND ISNULL(SM.ComplimentaryReason,'') <> '' THEN SM.ComplimentaryReason ELSE CancelReason END AS Reason,CardNo,CM.[Name] as Customer
+		,ISNULL(DelAmount+ContAmount+OtherAmount,0) AS OtherCharges
+		FROM R_SalesMaster SM
+			LEFT OUTER JOIN restaurant.Section S on S.[GuID] = SM.SectionID 
+			LEFT OUTER JOIN R_Counter C on C.[GuID] = SM.CounterID 
+			LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+			LEFT OUTER JOIN R_PaymentCards PC ON SM.CardID = PC.[GuID]
+			LEFT OUTER JOIN R_User U on U.[GuID]= SM.WaiterID
+			LEFT OUTER JOIN R_Customer CM ON CM.[GuID] = SM.CustomerID
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0
+		WHERE 
+			 (SM.TransactionDate>=@R_FromDate OR @R_FromDate IS NULL) and (SM.TransactionDate<@R_ToDate OR @R_ToDate IS NULL) 
+AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+			UNION ALL
+
+		SELECT SM.[No],SM.BillNo BillNo,SM.TransactionDate, SM.BillTime AS BillDate,SM.BillTime AS BillTime
+		,CASE WHEN [Card]>0.00 THEN 'Card' 
+			  WHEN CustomerCredit > 0 AND [Card] =0.00 AND [Cash]=0.00 THEN 'Credit'
+			  WHEN [Cash]>0.00 AND [Card]>0.00 OR [Cash]>0.00 AND CustomerCredit>0.00 OR [Card]>0.00 AND CustomerCredit>0.00 THEN 'MultiPayment'
+			  WHEN ComplementaryTotal>0 THEN 'Complementary' when IsPending=1 then 'None' 
+			  ELSE 'Cash' END AS PaymentType
+	   ,CASE WHEN CardID IS NOT NULL THEN PC.CardName
+			WHEN CardID IS NULL AND [card]<>0.00 THEN 'Card' 
+			ELSE 'Cash' END AS PaymenCardType
+		,SM.RTotal AS RateTotal
+		,CASE WHEN @VatEnabled = 0 THEN 0 ELSE SM.Tax  END AS VatAmount
+		,CASE WHEN @VatEnabled = 1 THEN 0 ELSE SM.Tax END AS TaxAmount
+		,(SM.Discount+ISNULL(SM.ProdDiscount,0)) [Discount]
+		,SM.RoundOff RoundOff
+		,((SM.Total+SM.Tax+SM.CessAmount- SM.Discount-ISNULL(SM.ProdDiscount,0)+SM.RoundOff))+ISNULL(DelAmount+ContAmount+OtherAmount,0) NetTotal
+		,SM.Cash AS [Cash]
+		,SM.[Card]AS [Card],C.Name [Counter], S.Name Section, B.Name AS Branch 
+		,U.Name AS [User]
+		,CASE WHEN SM.Deleted= 1 AND SM.Merged= 0 THEN 'Deleted'
+				WHEN Refund = 1 THEN 'Refund'
+				WHEN Cancelled = 1 AND SM.Merged = 0 THEN 'Cancelled'
+				WHEN SM.Merged = 1 THEN 'Merged'
+				WHEN IsComplementary = 1 THEN 'Complementary' 
+				WHEN IsPending = 0 AND SM.Deleted= 0 AND Refund = 0 AND Cancelled = 0 AND SM.Merged = 0  THEN 'Completed'
+				ELSE 'RunningOrder' END AS [SalesStatus]
+		,CASE WHEN ISNULL(SM.IsComplementary,0) = 1 AND ISNULL(SM.ComplimentaryReason,'') <> '' THEN SM.ComplimentaryReason ELSE CancelReason END AS Reason,CardNo,CM.[Name] as Customer
+		,ISNULL(DelAmount+ContAmount+OtherAmount,0) AS OtherCharges
+		FROM R_SalesTempMaster SM
+			LEFT OUTER JOIN restaurant.Section S on S.[GuID] = SM.SectionID 
+			LEFT OUTER JOIN R_Counter C on C.[GuID] = SM.CounterID 
+			LEFT OUTER JOIN R_Branch B ON B.[GuID] = SM.BranchID
+			LEFT OUTER JOIN R_PaymentCards PC ON SM.CardID = PC.[GuID]
+			LEFT OUTER JOIN R_User U on U.[GuID]= SM.WaiterID
+			LEFT OUTER JOIN R_Customer CM ON CM.[GuID] = SM.CustomerID
+			LEFT OUTER JOIN [dbo].[R_MiscellaneousSalesAmount] MSA ON MSA.MasterID = SM.[GuID] AND MSA.Merged = 0
+		WHERE (SM.TransactionDate>=@R_FromDate ) and (SM.TransactionDate<@R_ToDate OR @R_ToDate IS NULL) 
+		AND (SM.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+		) AS SalesStatusDetail
+	 
+
+	 SELECT COUNT(*) AS  SalesStatusReportCount
+		INTO #SalesStatusReportCount
+		FROM #SalesStatusReport
+
+	IF @PageSize = -1
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesStatusReportCount FROM #SalesStatusReportCount)[RowCount] 
+					FROM #SalesStatusReport
+					ORDER BY TransactionDate '+ @R_SortingDirection+',Section '+ @R_SortingDirection+',[No] '+ @R_SortingDirection+''
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesStatusReportCount FROM #SalesStatusReportCount)[RowCount] ,TransactionDate AS TransactionDate1, [No] AS [No1],Section AS Section1
+					FROM #SalesStatusReport
+					ORDER BY  ' + 
+					CASE
+                       WHEN @R_SortingColumn = '[BillTime]' THEN 'CONVERT(TIME, [BillTime])'
+                       ELSE @R_SortingColumn
+                     END
+					+' '+ @R_SortingDirection+',TransactionDate1 asc,Section1 asc, [No1] asc'
+				EXEC (@SortingCmd)
+			END
+		END
+
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesStatusReportCount FROM #SalesStatusReportCount)[RowCount] 
+					FROM #SalesStatusReport
+					ORDER BY TransactionDate '+ @R_SortingDirection+',Section '+ @R_SortingDirection+',[No] '+ @R_SortingDirection+'
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+			END
+		ELSE
+			BEGIN
+				SELECT @SortingCmd = '
+					SELECT *,(SELECT SalesStatusReportCount FROM #SalesStatusReportCount)[RowCount],TransactionDate AS TransactionDate1, [No] AS [No1] ,Section AS Section1
+					FROM #SalesStatusReport
+					ORDER BY  ' + 
+					CASE
+                        WHEN @R_SortingColumn = '[BillTime]' THEN 'CONVERT(TIME, [BillTime])'
+                        ELSE @R_SortingColumn
+                      END
+					+' '+ @R_SortingDirection+',TransactionDate1 asc,Section1 asc, [No1] asc
+					OFFSET (' + CAST(@R_PageNumber - 1 AS NVARCHAR(MAX)) + ')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS
+					FETCH NEXT ' + CAST(@R_PageSize AS NVARCHAR(MAX)) + ' ROWS ONLY'
+				EXEC (@SortingCmd)
+		END
+		END
+
+		------ FOR GETTING FOOTER TOTAL---------------------
+		SELECT ''AS [No],
+		       ''AS  BillNo,
+			   ''AS TransactionDate, 
+			   ''AS  BillDate,
+		       ''AS PaymentType,
+	           '' AS PaymenCardType,
+		       SUM(RateTotal)RateTotal,
+		       SUM(VatAmount) VatAmount,
+		       SUM(TaxAmount)TaxAmount,
+		       SUM([Discount])[Discount],
+		       SUM(RoundOff)RoundOff,
+			   SUM(NetTotal)NetTotal,
+		       SUM([Cash])[Cash],
+		       SUM([Card])[Card],
+			   ''AS [Counter],
+			   ''AS Section, 
+			   ''AS Branch,
+		       ''AS [User],
+			   ''AS [SalesStatus],
+		       ''AS Reason,
+			   ''AS CardNo,
+			   ''AS Customer
+			   ,SUM(OtherCharges) AS OtherCharges
+		FROM #SalesStatusReport
+     
+	------END OF DETAIL SECTION-----
+	
+	IF Object_id('TempDB.dbo.#SalesStatusReport') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesStatusReport
+	END
+
+	IF Object_id('TempDB.dbo.#SalesStatusReportCount') IS NOT NULL
+	BEGIN
+		DROP TABLE #SalesStatusReportCount
+	END
+
+	SET NOCOUNT OFF
+
+	END
+
+GO
+PRINT 'Altered SP Report_SalesStatusReportPaging (complimentary reason).';
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    DECLARE @PosSalesID int =
+        (SELECT TOP 1 ParentID FROM restaurant.WebMenu
+         WHERE Name IN ('Cancelled Sales','Refunded Sales','Deleted Sales') AND ISNULL(ParentID,0) <> 0
+         GROUP BY ParentID ORDER BY COUNT(*) DESC, ParentID);
+
+    IF @PosSalesID IS NULL
+        SET @PosSalesID = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name IN ('POS SALES','SALES REPORTS') ORDER BY ID);
+
+    IF @PosSalesID IS NULL
+        PRINT 'Section AN skipped: no POS SALES / SALES REPORTS category found in restaurant.WebMenu.';
+    ELSE IF NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = 'A1B2C3D4-0003-4E6F-9A8B-6C2D3E4F5A13')
+    BEGIN
+        INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, IsSubMenu, ControllerName, IsActive)
+        VALUES ('A1B2C3D4-0003-4E6F-9A8B-6C2D3E4F5A13', 'Complimentary Report', @PosSalesID,
+                '/Reports/ComplimentaryReport/Index', 'CheckCircle', 1, 'ComplimentaryReport', 1);
+        PRINT 'Inserted WebMenu entry Complimentary Report under POS SALES.';
+    END
+    ELSE
+    BEGIN
+        -- Re-activate it if someone switched it off, rather than leave the report unreachable.
+        UPDATE restaurant.WebMenu SET IsActive = 1
+        WHERE GuID = 'A1B2C3D4-0003-4E6F-9A8B-6C2D3E4F5A13' AND ISNULL(IsActive,0) = 0;
+        PRINT 'WebMenu entry Complimentary Report already exists.';
+    END
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[UserWebMenuPermission]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    DECLARE @SystemTypeID int = (SELECT TOP 1 ID FROM dbo.R_UserType WHERE Name = 'System' ORDER BY ID);
+    DECLARE @CompMenuID int = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE GuID = 'A1B2C3D4-0003-4E6F-9A8B-6C2D3E4F5A13');
+
+    IF @SystemTypeID IS NULL OR @CompMenuID IS NULL
+        PRINT 'Section AN: System user type or Complimentary Report menu missing, permission skipped.';
+    ELSE IF NOT EXISTS (SELECT 1 FROM restaurant.UserWebMenuPermission WHERE MenuID = @CompMenuID AND UserTypeID = @SystemTypeID)
+    BEGIN
+        INSERT INTO restaurant.UserWebMenuPermission (GuID, UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+        VALUES (NEWID(), @SystemTypeID, @CompMenuID, 1, 1, 1, 1);
+        PRINT 'Granted System user type full rights on the Complimentary Report menu.';
+    END
+    ELSE
+        PRINT 'System user type already had rights on the Complimentary Report menu.';
+END
+GO
+
+PRINT 'Section AN complete.';
+GO
+
+-- ============================================================
+-- Section AO (2026-10-16): Payment Change for settled bills
+-- (Restaurant Issue/Modifications #3 and #4).
+--
+-- A settled bill's tender split (Cash / Card / Credit) can be
+-- corrected from the new Windows screen 'Payment Change', only
+-- BEFORE day close (the bill is still in R_SalesMaster, so the
+-- day-close totals and the GL voucher pick up the corrected
+-- values; nothing already posted is touched). Every change is
+-- written to dbo.R_PaymentChangeLog, synced to the web like
+-- R_VoidLog, and shown by the web 'Payment Change Report'.
+--
+-- Contents:
+--  1. dbo.R_PaymentChangeLog (+ Version rowversion for sync)
+--  2. Sync: PaymentChangeLog_UDT, Sync_PaymentChangeLog_GetAll
+--     (local) and Sync_PaymentChangeLog_Insert (web)
+--  3. Report_PaymentChangeLogPaging (web report)
+--  4. Sync_Sales_Insert (web): payments are now replaced for every
+--     bill in the batch. Before, they were only deleted for bills
+--     that still HAD payment rows, so a bill changed to 100% credit
+--     kept its old Cash/Card rows on the web for ever. Patched in
+--     place from the live definition (one statement), because the
+--     procedure is long and differs between databases.
+--  5. Sync_CustomerCreditDetail_Insert (web): match on the row's
+--     GuID. The old match (BillID + MasterID + BillNo) never matched
+--     sales credit rows (MasterID is NULL there), so every re-sync
+--     of a credit row inserted a duplicate on the web.
+--  6. Windows menu 'Payment Change' (R_Menu, Module 'PaymentChange')
+--     and web menu 'Payment Change Report', with System rights.
+-- ============================================================
+
+PRINT 'Section AO: Payment Change...';
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_PaymentChangeLog]') AND type in (N'U'))
+BEGIN
+    CREATE TABLE [dbo].[R_PaymentChangeLog](
+        [ID] [int] IDENTITY(1,1) NOT NULL,
+        [GuID] [uniqueidentifier] NOT NULL,
+        [MasterID] [uniqueidentifier] NULL,
+        [BillNo] [varchar](50) NULL,
+        [TransactionDate] [date] NULL,
+        [SectionID] [uniqueidentifier] NULL,
+        [CounterID] [uniqueidentifier] NULL,
+        [BranchID] [uniqueidentifier] NULL,
+        [BillAmount] [money] NULL,
+        [OldPaymentType] [varchar](30) NULL,
+        [OldCash] [money] NULL,
+        [OldCard] [money] NULL,
+        [OldCredit] [money] NULL,
+        [OldCardNo] [varchar](50) NULL,
+        [OldCustomerID] [uniqueidentifier] NULL,
+        [NewPaymentType] [varchar](30) NULL,
+        [NewCash] [money] NULL,
+        [NewCard] [money] NULL,
+        [NewCredit] [money] NULL,
+        [NewCardNo] [varchar](50) NULL,
+        [NewCustomerID] [uniqueidentifier] NULL,
+        [Reason] [varchar](250) NULL,
+        [ChangedByUserID] [uniqueidentifier] NULL,
+        [ChangedByUserName] [varchar](100) NULL,
+        [ChangedDate] [datetime] NOT NULL,
+        [CompanyID] [int] NULL,
+        [FinancialYearID] [decimal](18, 0) NULL,
+        [Version] ROWVERSION,
+    PRIMARY KEY CLUSTERED ([ID] ASC)
+    WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF,
+          ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+    ) ON [PRIMARY];
+    PRINT 'Created Table dbo.R_PaymentChangeLog successfully.';
+END
+ELSE
+    PRINT 'Table dbo.R_PaymentChangeLog already exists.';
+GO
+
+-- Insert proc first-dropped so the type can be recreated (see Section on R_VoidLog sync, Msg 3732).
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[Sync_PaymentChangeLog_Insert]') AND type = 'P')
+    DROP PROCEDURE [restaurant].[Sync_PaymentChangeLog_Insert];
+GO
+
+IF EXISTS (SELECT 1 FROM sys.table_types WHERE name = 'PaymentChangeLog_UDT' AND schema_id = SCHEMA_ID('restaurant'))
+    DROP TYPE [restaurant].[PaymentChangeLog_UDT];
+GO
+
+CREATE TYPE [restaurant].[PaymentChangeLog_UDT] AS TABLE (
+    [GuID]              uniqueidentifier NOT NULL,
+    [MasterID]          uniqueidentifier NULL,
+    [BillNo]            varchar(50)      NULL,
+    [TransactionDate]   date             NULL,
+    [SectionID]         uniqueidentifier NULL,
+    [CounterID]         uniqueidentifier NULL,
+    [BranchID]          uniqueidentifier NULL,
+    [BillAmount]        money            NULL,
+    [OldPaymentType]    varchar(30)      NULL,
+    [OldCash]           money            NULL,
+    [OldCard]           money            NULL,
+    [OldCredit]         money            NULL,
+    [OldCardNo]         varchar(50)      NULL,
+    [OldCustomerID]     uniqueidentifier NULL,
+    [NewPaymentType]    varchar(30)      NULL,
+    [NewCash]           money            NULL,
+    [NewCard]           money            NULL,
+    [NewCredit]         money            NULL,
+    [NewCardNo]         varchar(50)      NULL,
+    [NewCustomerID]     uniqueidentifier NULL,
+    [Reason]            varchar(250)     NULL,
+    [ChangedByUserID]   uniqueidentifier NULL,
+    [ChangedByUserName] varchar(100)     NULL,
+    [ChangedDate]       datetime         NOT NULL,
+    [CompanyID]         int              NULL,
+    [FinancialYearID]   decimal(18,0)    NULL
+);
+GO
+PRINT 'Created restaurant.PaymentChangeLog_UDT.';
+GO
+
+-- Local-side pull: run against the WinForms DB, feeds Server.Sync's PaymentChangeLogSyncHandler.
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_PaymentChangeLog_GetAll]
+    @Version BIGINT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT GuID, MasterID, BillNo, TransactionDate, SectionID, CounterID, BranchID, BillAmount,
+           OldPaymentType, OldCash, OldCard, OldCredit, OldCardNo, OldCustomerID,
+           NewPaymentType, NewCash, NewCard, NewCredit, NewCardNo, NewCustomerID,
+           Reason, ChangedByUserID, ChangedByUserName, ChangedDate, CompanyID, FinancialYearID,
+           CONVERT(BIGINT, Version) AS [Version]
+    FROM dbo.R_PaymentChangeLog
+    WHERE CONVERT(BIGINT, Version) > ISNULL(@Version, 0)
+    ORDER BY Version;
+    SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Sync_PaymentChangeLog_GetAll.';
+GO
+
+-- Cloud-side push: run against the Web DB via Api/Sale/PaymentChangeLog/Sync/Upload.
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_PaymentChangeLog_Insert]
+    @UDT_PaymentChangeLog [restaurant].[PaymentChangeLog_UDT] READONLY
+AS
+BEGIN
+    -- NOCOUNT deliberately NOT set: the upload judges success by rows-affected (as Sync_VoidLog_Insert).
+    MERGE dbo.[R_PaymentChangeLog] AS trg
+    USING @UDT_PaymentChangeLog AS s
+    ON s.GuID = trg.GuID
+    WHEN MATCHED THEN UPDATE SET
+        trg.MasterID = s.MasterID, trg.BillNo = s.BillNo, trg.TransactionDate = s.TransactionDate,
+        trg.SectionID = s.SectionID, trg.CounterID = s.CounterID, trg.BranchID = s.BranchID,
+        trg.BillAmount = s.BillAmount,
+        trg.OldPaymentType = s.OldPaymentType, trg.OldCash = s.OldCash, trg.OldCard = s.OldCard,
+        trg.OldCredit = s.OldCredit, trg.OldCardNo = s.OldCardNo, trg.OldCustomerID = s.OldCustomerID,
+        trg.NewPaymentType = s.NewPaymentType, trg.NewCash = s.NewCash, trg.NewCard = s.NewCard,
+        trg.NewCredit = s.NewCredit, trg.NewCardNo = s.NewCardNo, trg.NewCustomerID = s.NewCustomerID,
+        trg.Reason = s.Reason, trg.ChangedByUserID = s.ChangedByUserID, trg.ChangedByUserName = s.ChangedByUserName,
+        trg.ChangedDate = s.ChangedDate, trg.CompanyID = s.CompanyID, trg.FinancialYearID = s.FinancialYearID
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (GuID, MasterID, BillNo, TransactionDate, SectionID, CounterID, BranchID, BillAmount,
+                OldPaymentType, OldCash, OldCard, OldCredit, OldCardNo, OldCustomerID,
+                NewPaymentType, NewCash, NewCard, NewCredit, NewCardNo, NewCustomerID,
+                Reason, ChangedByUserID, ChangedByUserName, ChangedDate, CompanyID, FinancialYearID)
+        VALUES (s.GuID, s.MasterID, s.BillNo, s.TransactionDate, s.SectionID, s.CounterID, s.BranchID, s.BillAmount,
+                s.OldPaymentType, s.OldCash, s.OldCard, s.OldCredit, s.OldCardNo, s.OldCustomerID,
+                s.NewPaymentType, s.NewCash, s.NewCard, s.NewCredit, s.NewCardNo, s.NewCustomerID,
+                s.Reason, s.ChangedByUserID, s.ChangedByUserName, s.ChangedDate, s.CompanyID, s.FinancialYearID);
+END
+GO
+PRINT 'Created or altered SP Sync_PaymentChangeLog_Insert.';
+GO
+
+CREATE OR ALTER PROCEDURE [restaurant].[Report_PaymentChangeLogPaging]
+(
+ @FromDate         DATE          = NULL,
+ @ToDate           DATE          = NULL,
+ @BranchID         VARCHAR(MAX)  = NULL,
+ @SectionID        VARCHAR(MAX)  = NULL,
+ @CounterID        VARCHAR(MAX)  = NULL,
+ @UserID           VARCHAR(MAX)  = NULL,
+ @PageNumber       INT           = NULL,
+ @PageSize         INT           = NULL,
+ @SortingColumn    VARCHAR(MAX)  = NULL,
+ @SortingDirection VARCHAR(MAX)  = NULL
+)
+AS
+BEGIN
+	DECLARE
+	     @R_FromDate         DATE           = @FromDate,
+	     @R_ToDate           DATE           = @ToDate,
+	     @R_BranchID         VARCHAR(MAX)   = NULLIF(@BranchID,''),
+	     @R_SectionID        VARCHAR(MAX)   = NULLIF(@SectionID,''),
+	     @R_CounterID        VARCHAR(MAX)   = NULLIF(@CounterID,''),
+	     @R_UserID           VARCHAR(MAX)   = NULLIF(@UserID,''),
+	     @R_PageNumber       INT            = ISNULL(@PageNumber,1),
+	     @R_PageSize         INT            = @PageSize,
+	     @R_SortingColumn    VARCHAR(MAX)   = @SortingColumn,
+	     @R_SortingDirection VARCHAR(MAX)   = ISNULL(@SortingDirection,'DESC')
+
+	DECLARE @SortingCmd VARCHAR(MAX)
+
+	SET ARITHABORT ON; SET XACT_ABORT ON; SET NOCOUNT ON;
+	IF @R_ToDate IS NOT NULL SET @R_ToDate = DATEADD(D, 1, @R_ToDate);
+
+	IF Object_id('TempDB.dbo.#PaymentChangeReport') IS NOT NULL DROP TABLE #PaymentChangeReport;
+	IF Object_id('TempDB.dbo.#PaymentChangeReportCount') IS NOT NULL DROP TABLE #PaymentChangeReportCount;
+
+	-- Filtered on the bill's business date (TransactionDate), the same date every other sales report uses.
+	SELECT PL.[GuID], PL.BillNo, PL.TransactionDate AS BillDate, PL.ChangedDate,
+	       PL.BillAmount,
+	       PL.OldPaymentType, PL.OldCash, PL.OldCard, PL.OldCredit, ISNULL(OC.Name,'') AS OldCustomer,
+	       PL.NewPaymentType, PL.NewCash, PL.NewCard, PL.NewCredit, ISNULL(NC.Name,'') AS NewCustomer,
+	       ISNULL(PL.NewCardNo,'') AS CardNo, ISNULL(PL.Reason,'') AS Reason,
+	       ISNULL(PL.ChangedByUserName,'') AS [User],
+	       ISNULL(S.Name,'') AS [Section], ISNULL(C.Name,'') AS [Counter], ISNULL(B.Name,'') AS [Branch]
+	INTO #PaymentChangeReport
+	FROM [dbo].[R_PaymentChangeLog] PL
+	LEFT OUTER JOIN restaurant.Section S ON S.[GuID] = PL.SectionID
+	LEFT OUTER JOIN R_Counter C ON C.[GuID] = PL.CounterID
+	LEFT OUTER JOIN R_Branch B ON B.[GuID] = PL.BranchID
+	LEFT OUTER JOIN R_Customer OC ON OC.[GuID] = PL.OldCustomerID
+	LEFT OUTER JOIN R_Customer NC ON NC.[GuID] = PL.NewCustomerID
+	WHERE (PL.TransactionDate >= @R_FromDate OR @R_FromDate IS NULL)
+	AND (PL.TransactionDate < @R_ToDate OR @R_ToDate IS NULL)
+	AND (PL.BranchID = @R_BranchID OR @R_BranchID IS NULL)
+	AND (PL.SectionID = @R_SectionID OR @R_SectionID IS NULL)
+	AND (PL.CounterID = @R_CounterID OR @R_CounterID IS NULL)
+	AND (PL.ChangedByUserID = @R_UserID OR @R_UserID IS NULL);
+
+	SELECT COUNT(*) AS PaymentChangeCount INTO #PaymentChangeReportCount FROM #PaymentChangeReport;
+
+	IF @R_PageSize = -1 OR @R_PageSize IS NULL
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			SELECT @SortingCmd='SELECT *,(SELECT PaymentChangeCount FROM #PaymentChangeReportCount)[RowCount] FROM #PaymentChangeReport ORDER BY ChangedDate '+@R_SortingDirection+',BillNo '+@R_SortingDirection;
+		ELSE
+			SELECT @SortingCmd='SELECT *,(SELECT PaymentChangeCount FROM #PaymentChangeReportCount)[RowCount],ChangedDate AS ChangedDate1,BillNo AS BillNo1 FROM #PaymentChangeReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',ChangedDate1 desc,BillNo1 asc';
+		EXEC(@SortingCmd);
+	END
+	ELSE
+	BEGIN
+		IF @R_SortingColumn IS NULL
+			SELECT @SortingCmd='SELECT *,(SELECT PaymentChangeCount FROM #PaymentChangeReportCount)[RowCount] FROM #PaymentChangeReport ORDER BY ChangedDate '+@R_SortingDirection+',BillNo '+@R_SortingDirection+' OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+		ELSE
+			SELECT @SortingCmd='SELECT *,(SELECT PaymentChangeCount FROM #PaymentChangeReportCount)[RowCount],ChangedDate AS ChangedDate1,BillNo AS BillNo1 FROM #PaymentChangeReport ORDER BY '+@R_SortingColumn+' '+@R_SortingDirection+',ChangedDate1 desc,BillNo1 asc OFFSET ('+CAST(@R_PageNumber-1 AS NVARCHAR(MAX))+')*'+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS FETCH NEXT '+CAST(@R_PageSize AS NVARCHAR(MAX))+' ROWS ONLY';
+		EXEC(@SortingCmd);
+	END
+
+	-- Footer totals
+	SELECT SUM(BillAmount) AS BillAmount,
+	       SUM(OldCash) AS OldCash, SUM(OldCard) AS OldCard, SUM(OldCredit) AS OldCredit,
+	       SUM(NewCash) AS NewCash, SUM(NewCard) AS NewCard, SUM(NewCredit) AS NewCredit
+	FROM #PaymentChangeReport;
+
+	IF Object_id('TempDB.dbo.#PaymentChangeReport') IS NOT NULL DROP TABLE #PaymentChangeReport;
+	IF Object_id('TempDB.dbo.#PaymentChangeReportCount') IS NOT NULL DROP TABLE #PaymentChangeReportCount;
+	SET NOCOUNT OFF;
+END
+GO
+PRINT 'Created or altered SP Report_PaymentChangeLogPaging.';
+GO
+
+-- Sync_Sales_Insert (web): replace payments for every bill in the batch, not only bills that still
+-- have payment rows. Payments travel nested inside each sale (SalesSyncHandler), so every bill in
+-- @sale arrives with its complete payment set and deleting by @sale is safe. Patched from the live
+-- definition so the rest of this long, per-database procedure is left exactly as it is.
+DECLARE @def NVARCHAR(MAX) = OBJECT_DEFINITION(OBJECT_ID(N'[restaurant].[Sync_Sales_Insert]'));
+DECLARE @old NVARCHAR(400) = N'DELETE R_SalesPaymentDetail WHERE MasterID in (select MasterID from @salePaymentDetail)';
+DECLARE @new NVARCHAR(400) = N'DELETE R_SalesPaymentDetail WHERE MasterID in (select MasterID from @salePaymentDetail UNION select [Guid] from @sale)';
+DECLARE @pos INT;
+IF @def IS NULL
+    PRINT 'Section AO: Sync_Sales_Insert not found, payment-delete patch skipped.';
+ELSE IF CHARINDEX(@new, @def) > 0
+    PRINT 'Sync_Sales_Insert already replaces payments for every synced bill.';
+ELSE IF CHARINDEX(@old, @def) = 0
+    PRINT 'Section AO: Sync_Sales_Insert payment delete not in the expected form, patch skipped - check manually.';
+ELSE
+BEGIN
+    SET @def = REPLACE(@def, @old, @new);
+    SET @pos = PATINDEX(N'%CREATE%PROC%', @def);
+    SET @def = STUFF(@def, @pos, 6, N'ALTER');
+    EXEC sp_executesql @def;
+    PRINT 'Patched Sync_Sales_Insert: payments replaced for every synced bill.';
+END
+GO
+
+-- Sync_CustomerCreditDetail_Insert (web): match on the row's own GuID (it is carried unchanged from
+-- the local row). Rows without a GuID keep the old match so nothing that worked before changes.
+CREATE OR ALTER PROCEDURE [restaurant].[Sync_CustomerCreditDetail_Insert]
+
+	@UDT_R_CustomerCreditDetails  [restaurant].[Sync_CustomerCreditDetail_UDT] READONLY
+
+AS
+ BEGIN TRY
+    BEGIN TRANSACTION
+			  MERGE [R_CustomerCreditDetail] AS CD USING
+			  (
+			  SELECT [GuID],Date,BillID,Amount,Type,Module,CustomerID, MasterID,BillNo,RefNo
+			  FROM @UDT_R_CustomerCreditDetails
+			  )UCD ON (UCD.[GuID] IS NOT NULL AND UCD.[GuID] = CD.[GuID])
+			       OR (UCD.[GuID] IS NULL AND UCD.BillID = CD.BillID AND UCD.MasterID = CD.MasterID and UCD.BillNo = CD.BillNo)
+			  WHEN MATCHED THEN
+			  DELETE;
+			    INSERT INTO [R_CustomerCreditDetail]
+			  (
+				[GuID],Date,BillID,Amount,Type,Module,CustomerID, MasterID,BillNo,RefNo
+			  )
+			  SELECT
+				UCD.[GuID],UCD.Date,UCD.BillID,UCD.Amount,UCD.Type,UCD.Module,UCD.CustomerID, UCD.MasterID,UCD.BillNo,UCD.RefNo
+				FROM @UDT_R_CustomerCreditDetails UCD;
+
+  COMMIT TRANSACTION
+     END TRY
+   BEGIN CATCH
+        ROLLBACK TRANSACTION
+        RETURN -1
+   END CATCH
+ RETURN 1
+GO
+PRINT 'Altered SP Sync_CustomerCreditDetail_Insert (match on GuID).';
+GO
+
+-- Windows menu: 'Payment Change' under Transactions (resolved by contents, as Section AI).
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_Menu]') AND type = 'U')
+BEGIN
+    DECLARE @TxnMenuID int =
+        (SELECT TOP 1 ParentID FROM dbo.R_Menu
+         WHERE Module IN ('Sales','DailyClosing') AND ISNULL(ParentID,0) <> 0
+         GROUP BY ParentID ORDER BY COUNT(*) DESC, ParentID);
+
+    IF @TxnMenuID IS NULL
+        SET @TxnMenuID = (SELECT TOP 1 ID FROM dbo.R_Menu
+                          WHERE Name IN ('Transaction','Transactions','TRANSACTIONS') ORDER BY ID);
+
+    IF @TxnMenuID IS NULL
+        PRINT 'Section AO skipped: no Transactions menu group found in dbo.R_Menu.';
+    ELSE IF EXISTS (SELECT 1 FROM dbo.R_Menu WHERE Module = 'PaymentChange')
+        PRINT 'R_Menu entry Payment Change already exists.';
+    ELSE
+    BEGIN
+        INSERT INTO dbo.R_Menu (Name, ShortName, Image, Active, Module, ParentID, [Index], OtherLanguage, GuID)
+        VALUES ('Payment Change', 'Payment Change', '', 1, 'PaymentChange', @TxnMenuID, 0, 0,
+                'B7C1D2E3-0004-4F5A-8B6C-7D8E9F0A1B2C');
+        PRINT 'Inserted R_Menu entry Payment Change under the Transactions menu.';
+    END
+END
+GO
+
+-- System user type rights on Payment Change, in BOTH permission tables (see Section AI for why).
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_UserMenuPermission]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[R_Menu]') AND type = 'U')
+BEGIN
+    DECLARE @SysTypeID int = (SELECT TOP 1 ID FROM dbo.R_UserType WHERE Name = 'System' ORDER BY ID);
+    DECLARE @PCMenuID  int = (SELECT TOP 1 ID FROM dbo.R_Menu WHERE Module = 'PaymentChange' ORDER BY ID);
+
+    IF @SysTypeID IS NULL OR @PCMenuID IS NULL
+        PRINT 'Section AO: System user type or Payment Change menu not found, permission skipped.';
+    ELSE
+    BEGIN
+        IF OBJECT_ID(N'[dbo].[UserMenuPermission]') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM dbo.UserMenuPermission WHERE MenuID = @PCMenuID AND UserTypeID = @SysTypeID)
+        BEGIN
+            INSERT INTO dbo.UserMenuPermission (UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+            VALUES (@SysTypeID, @PCMenuID, 1, 1, 1, 1);
+            PRINT 'Granted System user type rights on the Payment Change menu (UserMenuPermission).';
+        END
+
+        IF NOT EXISTS (SELECT 1 FROM dbo.R_UserMenuPermission WHERE MenuID = @PCMenuID AND UserTypeID = @SysTypeID)
+        BEGIN
+            INSERT INTO dbo.R_UserMenuPermission (UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+            VALUES (@SysTypeID, @PCMenuID, 1, 1, 1, 1);
+            PRINT 'Granted System user type rights on the Payment Change menu (R_UserMenuPermission).';
+        END
+    END
+END
+GO
+
+-- Web menu: 'Payment Change Report' under POS SALES (resolved as Section AN).
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    DECLARE @PosSalesID int =
+        (SELECT TOP 1 ParentID FROM restaurant.WebMenu
+         WHERE Name IN ('Cancelled Sales','Refunded Sales','Deleted Sales') AND ISNULL(ParentID,0) <> 0
+         GROUP BY ParentID ORDER BY COUNT(*) DESC, ParentID);
+
+    IF @PosSalesID IS NULL
+        SET @PosSalesID = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE Name IN ('POS SALES','SALES REPORTS') ORDER BY ID);
+
+    IF @PosSalesID IS NULL
+        PRINT 'Section AO skipped: no POS SALES / SALES REPORTS category found in restaurant.WebMenu.';
+    ELSE IF NOT EXISTS (SELECT 1 FROM restaurant.WebMenu WHERE GuID = 'A1B2C3D4-0004-4E6F-9A8B-6C2D3E4F5A14')
+    BEGIN
+        INSERT INTO restaurant.WebMenu (GuID, Name, ParentID, Url, Icon, IsSubMenu, ControllerName, IsActive)
+        VALUES ('A1B2C3D4-0004-4E6F-9A8B-6C2D3E4F5A14', 'Payment Change Report', @PosSalesID,
+                '/Reports/PaymentChangeReport/Index', 'Repeat', 1, 'PaymentChangeReport', 1);
+        PRINT 'Inserted WebMenu entry Payment Change Report under POS SALES.';
+    END
+    ELSE
+    BEGIN
+        UPDATE restaurant.WebMenu SET IsActive = 1
+        WHERE GuID = 'A1B2C3D4-0004-4E6F-9A8B-6C2D3E4F5A14' AND ISNULL(IsActive,0) = 0;
+        PRINT 'WebMenu entry Payment Change Report already exists.';
+    END
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[UserWebMenuPermission]') AND type = 'U')
+   AND EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[restaurant].[WebMenu]') AND type = 'U')
+BEGIN
+    DECLARE @SystemTypeID int = (SELECT TOP 1 ID FROM dbo.R_UserType WHERE Name = 'System' ORDER BY ID);
+    DECLARE @PCWebMenuID int = (SELECT TOP 1 ID FROM restaurant.WebMenu WHERE GuID = 'A1B2C3D4-0004-4E6F-9A8B-6C2D3E4F5A14');
+
+    IF @SystemTypeID IS NULL OR @PCWebMenuID IS NULL
+        PRINT 'Section AO: System user type or Payment Change Report menu missing, permission skipped.';
+    ELSE IF NOT EXISTS (SELECT 1 FROM restaurant.UserWebMenuPermission WHERE MenuID = @PCWebMenuID AND UserTypeID = @SystemTypeID)
+    BEGIN
+        INSERT INTO restaurant.UserWebMenuPermission (GuID, UserTypeID, MenuID, [View], [Add], [Edit], Deletion)
+        VALUES (NEWID(), @SystemTypeID, @PCWebMenuID, 1, 1, 1, 1);
+        PRINT 'Granted System user type full rights on the Payment Change Report menu.';
+    END
+    ELSE
+        PRINT 'System user type already had rights on the Payment Change Report menu.';
+END
+GO
+
+PRINT 'Section AO complete.';
 GO
